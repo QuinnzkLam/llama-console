@@ -1,0 +1,20 @@
+{
+  "model": "D:\\models\\qwen3.8-27b-gguf-q8_0\\Qwen3.8-27B-Q8_0.gguf",
+  "mmproj": "D:\\models\\qwen3.8-27b-gguf-q8_0\\mmproj-F16.gguf",
+  "host": "0.0.0.0",
+  "port": 18605,
+  "ngl": 999,
+  "split_mode": "tensor",
+  "ctx_size": 262144,
+  "parallel": 1,
+  "spec_type": "draft-mtp",
+  "ctk": "q8_0",
+  "ctv": "q8_0",
+  "flash_attn": "on",
+  "image_min_tokens": 1024,
+  "alias": "qwen3.8-27b",
+  "log_file": "D:\\services\\llama-server\\llama_win.log",
+  "cuda_visible_devices": "0,1",
+  "auto_check_updates": false,
+  "api_port": 18610
+}

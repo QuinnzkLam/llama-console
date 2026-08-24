@@ -1,0 +1,44 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+*.egg-info/
+
+# Virtual env
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Qt
+*.user
+.moc/
+
+# Build
+build/
+dist/
+*.spec
+*.exe
+
+# Logs
+logs/*.log
+logs/*.csv
+logs/*.txt
+logs/api.log
+logs/error.log
+logs/token-stats.csv
+!logs/.gitkeep
+
+# Config (keep templates, ignore generated tokens)
+config/remote-token.txt
+
+# OS
+.DS_Store
+Thumbs.db
