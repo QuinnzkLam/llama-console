@@ -1,0 +1,361 @@
+"""ServerControlSidebar - 侧边栏底部 Server 控制区段 (Quinn 09:00 反馈).
+
+设计：
+- 仅 2 个按钮：「启动」「停止」(Quinn 09:00: 删 "快速/长文/调试" 方案, 启动参数从设置页 cmdline_args 读取)
+- 当前 llama-server state 决定按钮 enabled 状态:
+  - stopped/loading → 启动可点，停止禁用
+  - running          → 启动禁用，停止可点
+  - error            → 两者都可点 (允许强制重启)
+- 启动参数：直接 current_cmdline_args() (用户在设置页保存的), 不再用内置方案
+- 自动轮询 backend_llama.snapshot() (1.5s 间隔) 刷新按钮状态
+- 信号: start_clicked / stop_clicked 由 MainWindow 捕获调 backend_llama.start() / stop()
+
+Quinn 11:04 (第六轮): 按钮图标改为 setIcon(QIcon) 几何矢量渲染
+- 原用 Unicode 字符 "▶"/"⏹" 直接拼进 QPushButton 文本 → 几何字符与文字 x-height
+  基线错位 (▶ 视觉中心略偏上, ⏹ 居中), 看起来上下不齐
+- 新方案: QPainter 画 QPixmap (居中三角形/正方形), 通过 setIcon() 设置,
+  Qt 自动按统一 baseline 对齐图标 + 文字, 各按钮视觉中心一致
+"""
+from PySide6.QtCore import Qt, QTimer, QRect
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtWidgets import (
+    QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget,
+)
+
+from .. import theme as t
+from ..backend import llama_cpp as backend_llama
+
+
+# ============================================================
+# Quinn 11:04: 按钮图标工厂 — 把 ▶ / ■ 用 QPainter 画成矢量 QPixmap,
+# 让 QPushButton.setIcon() + setText() 由 Qt 内部统一垂直居中,
+# 避免 Unicode 几何字符 (三角/方块) 与文字基线错位问题
+# ============================================================
+def _make_icon(kind: str, color_hex: str, px: int = 14) -> QIcon:
+    """矢量几何图标: 'play' = ▶ 等腰三角形, 'stop' = ■ 实心正方形.
+
+    Returns:
+        QIcon 含 Normal (主色) + Disabled (半透明灰) 2 态, 跟随按钮 enabled.
+    """
+    icon = QIcon()
+    # ---- Normal 态: 主色 ----
+    pix = QPixmap(px, px)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor(color_hex))
+    p.setPen(Qt.PenStyle.NoPen)
+    if kind == "play":
+        # 等腰三角形, 右侧尖端居中, 视觉重心在画布中央
+        margin_x = max(2, int(px * 0.18))
+        margin_y = max(2, int(px * 0.18))
+        path = QPainterPath()
+        path.moveTo(margin_x, margin_y)
+        path.lineTo(px - margin_x, px / 2)
+        path.lineTo(margin_x, px - margin_y)
+        path.closeSubpath()
+        p.drawPath(path)
+    elif kind == "stop":
+        # 实心正方形, 上下左右对称, 居中无歧义
+        m = max(2, int(px * 0.20))
+        p.drawRect(QRect(m, m, px - 2 * m, px - 2 * m))
+    p.end()
+    icon.addPixmap(pix, QIcon.Mode.Normal, QIcon.State.On)
+
+    # ---- Disabled 态: 同样形状 + 半透明灰, 按钮禁用时图标也变灰 ----
+    pix_dis = QPixmap(px, px)
+    pix_dis.fill(Qt.GlobalColor.transparent)
+    p2 = QPainter(pix_dis)
+    p2.setRenderHint(QPainter.RenderHint.Antialiasing)
+    gray = QColor(140, 145, 155, 180)  # text_muted 近似色
+    p2.setBrush(gray)
+    p2.setPen(Qt.PenStyle.NoPen)
+    if kind == "play":
+        margin_x = max(2, int(px * 0.18))
+        margin_y = max(2, int(px * 0.18))
+        path = QPainterPath()
+        path.moveTo(margin_x, margin_y)
+        path.lineTo(px - margin_x, px / 2)
+        path.lineTo(margin_x, px - margin_y)
+        path.closeSubpath()
+        p2.drawPath(path)
+    elif kind == "stop":
+        m = max(2, int(px * 0.20))
+        p2.drawRect(QRect(m, m, px - 2 * m, px - 2 * m))
+    p2.end()
+    icon.addPixmap(pix_dis, QIcon.Mode.Disabled, QIcon.State.On)
+    return icon
+
+
+# ============================================================
+# Service control state badge (mini)
+# ============================================================
+def _state_to_key(state: str) -> str:
+    return {
+        "running":  "running",
+        "loading":  "loading",
+        "stopped":  "stopped",
+        "error":    "error",
+    }.get(state, "stopped")
+
+
+# ============================================================
+# 主组件: ServerControlSidebar
+# ============================================================
+class ServerControlSidebar(QWidget):
+    """侧边栏底部「启动/停止」区段, 无分隔线无标题 (Quinn 09:00 反馈)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ServerControlSidebar")
+        self.setStyleSheet(
+            f"""
+            QWidget#ServerControlSidebar {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            t.scaled(t.space("3")), t.scaled(t.space("2")),
+            t.scaled(t.space("3")), t.scaled(t.space("2")),
+        )
+        # Quinn 09:00 (第二轮): 按钮间距 8→4, 紧凑
+        layout.setSpacing(t.scaled(t.space("1")))
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)
+
+        # Quinn 09:30 (第四轮): 上方 stretch 把按钮推至侧边栏垂直中段
+        layout.addStretch(2)
+
+        # ---- 紧凑状态指示 (圆点 + 文本, 内联) ----
+        # Quinn 09:00 (第二轮): 删除大框 "未启动" 框框 (140px+),
+        # 改为圆点 + 文本, 高度 ~20px. 保留状态反馈价值 (运行中/加载中/未启动/错误)
+        self._status_dot = QLabel("\u25cf")  # ●
+        dot_font = QFont()
+        dot_font.setPointSize(t.FONT_SIZE["xs"])
+        dot_font.setBold(True)
+        self._status_dot.setFont(dot_font)
+        self._status_dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_dot.setMinimumHeight(t.scaled(14, floor=12))
+        self._status_dot.setStyleSheet(
+            f"color: {t.color('text_muted')}; background: transparent; border: none;"
+        )
+
+        self._status_text = QLabel("未启动")
+        text_font = QFont()
+        text_font.setPointSize(t.FONT_SIZE["xs"])
+        text_font.setBold(True)
+        self._status_text.setFont(text_font)
+        self._status_text.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self._status_text.setMinimumHeight(t.scaled(14, floor=12))
+        self._status_text.setStyleSheet(
+            f"color: {t.color('text_secondary')}; background: transparent; border: none;"
+        )
+
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(t.scaled(t.space("1")))
+        status_row.setSizeConstraint(QHBoxLayout.SizeConstraint.SetNoConstraint)
+        status_row.addStretch(1)
+        status_row.addWidget(self._status_dot)
+        status_row.addWidget(self._status_text)
+        status_row.addStretch(1)
+        layout.addLayout(status_row)
+
+        # 状态指示与按钮间小间距
+        layout.addSpacing(t.scaled(t.space("2")))
+
+        # ---- Start 按钮 (实心 primary) ----
+        # Quinn 11:04: 图标改用 _make_icon 矢量渲染, Qt setIcon + setText 自动对齐基线
+        self._start_btn = _SidebarActionButton(
+            text="启动",
+            icon_kind="play",
+            style="primary",
+        )
+        self._start_btn.clicked.connect(self._on_start_clicked)
+        layout.addWidget(self._start_btn)
+
+        # ---- Stop 按钮 (描边 outline) ----
+        self._stop_btn = _SidebarActionButton(
+            text="停止",
+            icon_kind="stop",
+            style="outline",
+        )
+        self._stop_btn.clicked.connect(self._on_stop_clicked)
+        layout.addWidget(self._stop_btn)
+
+        # Quinn 09:30: 下方 stretch=2 与上方对称, 把启动/停止 + 状态指示
+        # 一起推到侧边栏垂直中央.
+        layout.addStretch(3)
+
+        # ---- state 轮询 (1.5s 间隔) ----
+        self._last_state: str | None = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(1500)
+        self._timer.timeout.connect(self._refresh_state)
+        self._timer.start()
+        # 立即拉一次
+        self._refresh_state()
+
+    # ============================================================
+    # Internal
+    # ============================================================
+    def _refresh_state(self) -> None:
+        """读取 backend_llama.snapshot().state 切换按钮 enabled."""
+        try:
+            snap = backend_llama.snapshot()
+            state = snap.state
+        except Exception:
+            state = "stopped"
+
+        if state == self._last_state:
+            return  # 无变化不刷 UI
+        self._last_state = state
+
+        # 按钮启用规则
+        if state == "running":
+            self._start_btn.setEnabled(False)
+            self._stop_btn.setEnabled(True)
+        elif state in ("loading", "starting"):
+            self._start_btn.setEnabled(False)
+            self._stop_btn.setEnabled(True)
+        else:  # stopped / error / unknown
+            self._start_btn.setEnabled(True)
+            self._stop_btn.setEnabled(False)
+
+        # pill 文案 + 颜色
+        state_text_map = {
+            "running":  ("运行中",   "success"),
+            "loading":  ("加载中",   "warning"),
+            "stopped":  ("未启动",   "text_muted"),
+            "error":    ("错误",     "danger"),
+        }
+        text, color_key = state_text_map.get(state, ("未启动", "text_muted"))
+        color_hex = t.color(color_key)
+        # 紧凑指示: 圆点反映状态色, 文本保持次要色 (避免整片高亮)
+        self._status_text.setText(text)
+        self._status_text.setStyleSheet(
+            f"color: {t.color('text_secondary')}; background: transparent; border: none;"
+        )
+        self._status_dot.setStyleSheet(
+            f"color: {color_hex}; background: transparent; border: none;"
+        )
+
+    def _on_start_clicked(self) -> None:
+        """启动 llama-server: 读取 current_cmdline_args() 作为 extra_args."""
+        cb = getattr(self, "_on_start_cb", None)
+        if cb is not None:
+            cb()
+        else:
+            print("[ServerControlSidebar] no start callback registered")
+
+    def _on_stop_clicked(self) -> None:
+        cb = getattr(self, "_on_stop_cb", None)
+        if cb is not None:
+            cb()
+        else:
+            print("[ServerControlSidebar] no stop callback registered")
+
+    # ============================================================
+    # Public API
+    # ============================================================
+    def on_start(self, callback) -> None:
+        """注册启动点击 callback: callback()."""
+        self._on_start_cb = callback
+
+    def on_stop(self, callback) -> None:
+        """注册停止点击 callback: callback()."""
+        self._on_stop_cb = callback
+
+    def refresh(self) -> None:
+        """外部强制刷新 (例如点启动后想立即看 pill 变 loading)."""
+        self._last_state = None  # 让 _refresh_state 重跑
+        self._refresh_state()
+
+
+# ============================================================
+# Action button (实心 / 描边)
+# ============================================================
+class _SidebarActionButton(QWidget):
+    """侧边栏内的简易按钮: icon + label 居中, 高度固定.
+
+    Quinn 11:04: 图标用矢量 QPainter 画到 QPixmap, Qt setIcon + setText 自动基线对齐.
+    """
+
+    def __init__(self, text: str, icon_kind: str = "", style: str = "primary",
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import QPushButton
+        self._btn = QPushButton(self)
+        self._btn.setObjectName(f"SidebarAction{style.capitalize()}")
+        self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        t.fixed_h(self._btn, 40, floor=32)
+        self._btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        btn_font = QFont()
+        btn_font.setPointSize(t.FONT_SIZE["sm"])
+        btn_font.setBold(True)
+        self._btn.setFont(btn_font)
+
+        # 图标颜色: primary 按钮白文, outline 按钮主色文字
+        icon_color = (
+            t.color('text_on_primary') if style == "primary"
+            else t.color('text_primary')
+        )
+
+        if style == "primary":
+            self._btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: {t.color('primary')};
+                    color: {t.color('text_on_primary')};
+                    border: none;
+                    border-radius: {t.radius('md')}px;
+                    padding: 0 {t.scaled(12)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: {t.color('primary_hover')};
+                }}
+                QPushButton:disabled {{
+                    background-color: {t.color('surface_3')};
+                    color: {t.color('text_muted')};
+                }}
+                """
+            )
+        else:  # outline
+            self._btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {t.color('text_primary')};
+                    border: 1px solid {t.color('border')};
+                    border-radius: {t.radius('md')}px;
+                    padding: 0 {t.scaled(12)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: {t.color('card_hover')};
+                }}
+                QPushButton:disabled {{
+                    color: {t.color('text_muted')};
+                    border-color: {t.color('border')};
+                    background-color: transparent;
+                }}
+                """
+            )
+
+        # Quinn 11:04: 用 setIcon (QPixmap) + setText, Qt 内部统一 baseline 对齐
+        if icon_kind:
+            self._btn.setIcon(_make_icon(icon_kind, icon_color, px=14))
+            self._btn.setIconSize(self._btn.iconSize())  # 默认大小由 Qt 决定
+        self._btn.setText(text)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._btn)
+
+    # delegate 属性访问, 让外层能直接 .clicked.connect / .setEnabled
+    def __getattr__(self, name):
+        return getattr(self._btn, name)

@@ -1,0 +1,1052 @@
+﻿"""v2 backend/llama_cpp.py - llama-server 进程/启动/停止 + version + update check.
+
+架构独立: 唔依赖 v1 backend。直接用 psutil + httpx + subprocess + GitHub API。
+
+Quinn 14:00 (本轮):
+- _validate_pe(): 检查 MZ/PE 头 + Machine 字段, 识别 9 字节损坏占位文件
+  (Windows 会把这种文件当 16 位 DOS 程序弹"不支持的 16 位应用程序"对话框).
+- _BG_WORKER + _TOKEN_CACHE: 后台线程每 2s 拉一次 status + token_stats,
+  主线程即时读缓存 — 彻底消除 httpx 2s 超时阻塞导致的 GUI 刷新卡顿.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+import psutil
+
+LLAMA_PROCESS_NAME = "llama-server.exe"
+DEFAULT_PORT = 18605
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_CTX = 262144
+GITHUB_API = "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest"
+
+# v2 local compiled binary location
+_V2_BIN_DIR = Path("D:/llama-console/src/llama.cpp/build/bin/Release")
+# v1 precompiled fallback (Quinn's existing setup)
+_V1_FALLBACK = Path("D:/services/llama-server/llama-server.exe")
+# v2 models dir
+_MODELS_DIR = Path("D:/llama-console/models")
+
+
+# ============================================================
+# Binary location + version + PE 完整性校验 (Quinn 14:00)
+# ============================================================
+
+# Quinn 14:00: 已知合法 Machine 字段值
+_MACHINE_X64 = 0x8664
+_MACHINE_X86 = 0x14c
+_MACHINE_ARM64 = 0xaa64
+
+
+def _validate_pe(path: Path) -> tuple[bool, str]:
+    """校验 path 是否为合法 64/32 位 PE 可执行文件.
+
+    Quinn 14:00: 发现 D:\\services\\llama-server\\llama-server.exe 实际是 9 字节
+    占位文件 (内容 @echo off), Windows 看到非 PE 文件会弹"不支持的 16 位
+    应用程序"对话框 (NTVDM 错误). 这里识别这种情况并返回 False.
+
+    Returns:
+        (ok, reason): ok=True 表示合法 PE; ok=False 时 reason 是失败原因.
+
+    检测规则:
+      1. 文件大小 < 1KB (基本 PE header 都要 ~1KB+)
+      2. 头部 2 字节必须为 'MZ' (IMAGE_DOS_SIGNATURE)
+      3. e_lfanew (offset 0x3c) 指向 IMAGE_NT_SIGNATURE ('PE\\0\\0')
+      4. Machine 字段必须是 x64 / x86 / ARM64 之一 (拒绝 DOS MZ / 16 位 / 未识别)
+    """
+    try:
+        if not path.is_file():
+            return False, "文件不存在"
+        size = path.stat().st_size
+        if size < 1024:
+            return False, f"文件过小 ({size} bytes), 不是合法 PE 可执行文件"
+        with path.open("rb") as f:
+            head = f.read(max(1024, size))
+        if len(head) < 0x40:
+            return False, "文件无法读取完整 DOS 头"
+        # 1) MZ signature
+        if head[:2] != b"MZ":
+            return False, f"缺 MZ DOS 头 ({head[:4]!r})"
+        # 2) e_lfanew offset -> PE signature
+        if len(head) < 0x40:
+            return False, "文件头长度不足"
+        pe_offset = struct.unpack_from("<I", head, 0x3c)[0]
+        if pe_offset < 0x40 or pe_offset + 24 > len(head):
+            return False, f"e_lfanew 越界 ({pe_offset})"
+        if head[pe_offset:pe_offset + 4] != b"PE\x00\x00":
+            return False, "缺 PE\\0\\0 签名"
+        # 3) Machine 字段 (offset 0x18 from PE signature)
+        if pe_offset + 24 > len(head):
+            return False, "文件头截断, 无法读 Machine"
+        machine = struct.unpack_from("<H", head, pe_offset + 4)[0]
+        if machine not in (_MACHINE_X64, _MACHINE_X86, _MACHINE_ARM64):
+            return False, (
+                f"Machine=0x{machine:X} 不是合法的 PE 类型 "
+                "(预期 x64=0x8664 / x86=0x14C / ARM64=0xAA64)"
+            )
+        return True, "ok"
+    except OSError as e:
+        return False, f"读文件失败: {e}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"校验异常: {e}"
+
+
+def _format_size(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / (1024 * 1024):.1f} MB"
+
+
+def diagnose_llama_server_exe() -> dict:
+    """诊断 llama-server.exe 状态 — 给 UI 状态面板或启动诊断提示用.
+
+    Quinn 14:00: 修复弹"不支持的 16 位应用程序"对话框 — 提前识别损坏的
+    占位文件, 给清晰错误, 避免用户面对 NTVDM 的"与 64 位 Windows 不兼容".
+
+    Returns:
+        {
+            ok: bool,                     # 是否找到且 PE 合法
+            path: str | None,             # 实际定位到的 exe 路径
+            reason: str,                  # ok=False 时说明失败原因
+            candidates: list[{path, exists, valid, size, reason}],  # 所有候选诊断
+            error: str | None,            # 候选全部不可用时的汇总错误
+        }
+    """
+    out = {
+        "ok": False,
+        "path": None,
+        "reason": "",
+        "candidates": [],
+        "error": None,
+    }
+    if os.name == "nt":
+        candidates = [_V2_BIN_DIR / "llama-server.exe", _V1_FALLBACK]
+    else:
+        candidates = [_V2_BIN_DIR / "llama-server", _V1_FALLBACK.with_name("llama-server")]
+    for c in candidates:
+        info = {
+            "path": str(c),
+            "exists": c.is_file(),
+            "valid": False,
+            "size": 0,
+            "reason": "文件不存在",
+        }
+        if info["exists"]:
+            info["size"] = c.stat().st_size
+            valid, reason = _validate_pe(c)
+            info["valid"] = valid
+            info["reason"] = reason
+        out["candidates"].append(info)
+    # 找第一个有效的
+    for info in out["candidates"]:
+        if info["valid"]:
+            out["ok"] = True
+            out["path"] = info["path"]
+            out["reason"] = "ok"
+            return out
+    # 全部不可用 — 汇总原因
+    reasons = []
+    for info in out["candidates"]:
+        if info["exists"]:
+            reasons.append(
+                f"{info['path']} ({_format_size(info['size'])}): {info['reason']}"
+            )
+        else:
+            reasons.append(f"{info['path']}: 不存在")
+    out["error"] = "llama-server.exe 无法启动. 排查:\n  - " + "\n  - ".join(reasons)
+    out["reason"] = "no valid PE binary found"
+    return out
+
+
+def get_llama_server_exe() -> Path | None:
+    """Priority: v2 local build > v1 precompiled fallback > None.
+
+    Quinn 14:00: 加 PE 校验 — 损坏占位文件 (如 9 字节的 @echo off 假 exe)
+    直接跳过, 避免 Popen 后 Windows 弹"不支持的 16 位应用程序"对话框.
+    """
+    if os.name == "nt":
+        candidates = [
+            _V2_BIN_DIR / "llama-server.exe",
+            _V1_FALLBACK,
+        ]
+    else:
+        candidates = [_V2_BIN_DIR / "llama-server", _V1_FALLBACK.with_name("llama-server")]
+    for c in candidates:
+        if not c.is_file():
+            continue
+        ok, _ = _validate_pe(c)
+        if ok:
+            return c
+        # 损坏的占位文件 — 跳过, 但记录日志方便诊断
+        print(f"[llama_cpp] skip invalid PE: {c} ({_format_size(c.stat().st_size)})")
+    return None
+
+
+def get_current_version() -> str:
+    """Read built-in version string from llama-server binary.
+
+    Quinn 14:00: 加 PE 校验 — 损坏占位文件直接返回 "unknown", 不再
+    等 5 秒 timeout 由用户干着急.
+    """
+    exe = get_llama_server_exe()
+    if exe is None:
+        # 再单独跑一次诊断 — 可能是候选存在但 PE 损坏
+        diag = diagnose_llama_server_exe()
+        if diag["candidates"] and any(c["exists"] for c in diag["candidates"]):
+            return "binary invalid"
+        return "not built"
+    try:
+        result = subprocess.run(
+            [str(exe), "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        out = (result.stdout + result.stderr).strip()
+        m = re.search(r"version[:\s]+(\S+)", out, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        return out.splitlines()[0] if out else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def get_latest_github_release() -> dict:
+    """Return {ok, version, url, error}."""
+    try:
+        with httpx.Client(timeout=10.0) as c:
+            r = c.get(GITHUB_API, headers={"User-Agent": "llama-console-v2"})
+            r.raise_for_status()
+            data = r.json()
+            return {"ok": True, "version": data.get("tag_name", ""), "url": data.get("html_url", ""), "error": None}
+    except Exception as e:
+        return {"ok": False, "version": "", "url": "", "error": str(e)}
+
+
+def is_update_available() -> dict:
+    """Return {available, current, latest, error}."""
+    current = get_current_version()
+    rel = get_latest_github_release()
+    if not rel["ok"]:
+        return {"available": False, "current": current, "latest": "", "error": rel["error"]}
+    # Simple string compare (good enough for bNNNN format)
+    return {
+        "available": rel["version"] != current,
+        "current": current,
+        "latest": rel["version"],
+        "error": None,
+    }
+
+
+# ============================================================
+# Process status
+# ============================================================
+
+def _find_process() -> psutil.Process | None:
+    for p in psutil.process_iter(["name", "pid", "create_time"]):
+        try:
+            if p.info["name"] and p.info["name"].lower() == LLAMA_PROCESS_NAME.lower():
+                return p
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return None
+
+
+def _format_uptime(sec: int) -> str:
+    if sec <= 0:
+        return "-"
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
+def _probe_health(port: int) -> str:
+    """Probe /health to determine state. Returns "running" | "loading".
+
+    Quinn 14:00: timeout 2.0 -> 0.4s (localhost loopback 通常 < 5ms, 400ms
+    已经足够给慢启动留余量; server 完全 down 时快速失败不阻塞主线程).
+    """
+    try:
+        with httpx.Client(timeout=0.4) as c:
+            r = c.get(f"http://127.0.0.1:{port}/health")
+            if r.status_code == 200 and r.json().get("status") == "ok":
+                return "running"
+    except Exception:
+        pass
+    return "loading"
+
+
+def _get_model_info() -> tuple[str | None, str | None, int | None]:
+    """Return (model_name, quant, ctx_size) by reading process cmdline."""
+    proc = _find_process()
+    if proc is None:
+        return None, None, None
+    try:
+        cmdline = proc.cmdline()
+    except (psutil.AccessDenied, psutil.NoSuchProcess):
+        return None, None, None
+    model = None
+    quant = None
+    ctx = None
+    for i, arg in enumerate(cmdline):
+        if arg == "-m" and i + 1 < len(cmdline):
+            model = Path(cmdline[i + 1]).name
+        elif arg == "--port" and i + 1 < len(cmdline):
+            try: ctx = int(cmdline[i + 1])
+            except ValueError: pass
+    if model and "-" in model:
+        # Detect quant from filename like "Qwen3.8-27B-Q8_0.gguf"
+        m = re.search(r"-(Q\d+_\d+|[Ff]\d+|[Kk]\-[Ss]+|[Ii]Q\d+_[A-Z]+)", model)
+        if m:
+            quant = m.group(1)
+    return model, quant, ctx
+
+
+def get_status() -> SimpleNamespace:
+    """Return SimpleNamespace(state, model_name, quant, ctx_size, port, pid, uptime,
+    bind, public_url, local_url).
+
+    Quinn 14:00: /health 检测改走 0.4s 短超时 — server down / 卡住时不再
+    阻塞主线程 2 秒. 主线程一般通过 snapshot() 走后台缓存, get_status()
+    只在手动调用或 sync fallback 时执行.
+    """
+    proc = _find_process()
+    port = DEFAULT_PORT
+    if proc is None:
+        return SimpleNamespace(
+            state="stopped", model_name=None, quant=None, ctx_size=None,
+            port=port, pid=None, uptime="-", bind=f"{DEFAULT_HOST}:{port}",
+            public_url=None, local_url=None,
+        )
+    try:
+        uptime_sec = int(time.time() - proc.create_time)
+    except Exception:
+        uptime_sec = 0
+    model, quant, ctx = _get_model_info()
+    return SimpleNamespace(
+        state=_probe_health(port),  # 0.4s 短超时, server down 时快速失败
+        model_name=model, quant=quant, ctx_size=ctx,
+        port=port, pid=proc.pid, uptime=_format_uptime(uptime_sec),
+        bind=f"{DEFAULT_HOST}:{port}",
+        public_url=f"http://frp.example.com:{port}/v1",  # populated by frp.snapshot()
+        local_url=f"http://127.0.0.1:{port}",
+    )
+
+
+# ============================================================
+# 主线程缓存 + 后台线程采集 (Quinn 14:00: 消除 httpx 阻塞主线程导致的 GUI 卡顿)
+#
+# 问题: 原 snapshot() 走 1.5s TTL cache, 但 console.refresh() 间隔 10s > TTL,
+#       每次 refresh 都是冷调用 → httpx.get(/health) 2s 超时阻塞主线程,
+#       console 表现"刷一次卡一次". get_token_stats() 同理.
+#
+# 方案: 后台 daemon 线程每 2s 跑一次 (status + token_stats) 并写缓存.
+#       主线程 snapshot()/get_token_stats() 改为即时读缓存.
+# ============================================================
+_LLAMA_BG: dict = {
+    "status": None,         # 上次 status SimpleNamespace
+    "token_stats": None,    # 上次 token_stats SimpleNamespace
+    "ts": 0.0,              # monotonic 上次采集完成时间
+}
+_LLAMA_BG_LOCK = threading.Lock()
+_LLAMA_BG_THREAD: threading.Thread | None = None
+_LLAMA_BG_INTERVAL = 2.0       # s (与 hardware.py 一致)
+_LLAMA_BG_STARTED = False
+_LLAMA_BG_STALE_LIMIT = 5.0    # s (冷启动 / 后台挂时降级为同步)
+
+
+def _llama_bg_worker() -> None:
+    """后台线程: 每 2s 同步采集 status + token_stats."""
+    while True:
+        try:
+            try:
+                status = get_status()
+            except Exception:
+                status = _find_llama_status_minimal()
+            try:
+                tok = _collect_token_stats_now()
+            except Exception:
+                tok = SimpleNamespace(
+                    prompt_tokens=None, predicted_tokens=None,
+                    prompt_tps=None, predicted_tps=None, available=False,
+                )
+            with _LLAMA_BG_LOCK:
+                _LLAMA_BG["status"] = status
+                _LLAMA_BG["token_stats"] = tok
+                _LLAMA_BG["ts"] = time.monotonic()
+        except Exception:
+            # 单次失败不应杀死线程
+            pass
+        time.sleep(_LLAMA_BG_INTERVAL)
+
+
+def _find_llama_status_minimal() -> SimpleNamespace:
+    """最便宜的 fallback — 不做 httpx, 主线程同步 fallback 用."""
+    proc = _find_process()
+    port = DEFAULT_PORT
+    if proc is None:
+        return SimpleNamespace(
+            state="stopped", model_name=None, quant=None, ctx_size=None,
+            port=port, pid=None, uptime="-",
+            bind=f"{DEFAULT_HOST}:{port}",
+            public_url=None, local_url=None,
+        )
+    try:
+        uptime_sec = int(time.time() - proc.create_time)
+    except Exception:
+        uptime_sec = 0
+    model, quant, ctx = _get_model_info()
+    return SimpleNamespace(
+        state="loading",  # 无 /health 验证, 标 loading 表示未知
+        model_name=model, quant=quant, ctx_size=ctx,
+        port=port, pid=proc.pid, uptime=_format_uptime(uptime_sec),
+        bind=f"{DEFAULT_HOST}:{port}",
+        public_url=f"http://frp.example.com:{port}/v1",
+        local_url=f"http://127.0.0.1:{port}",
+    )
+
+
+def _ensure_llama_bg() -> None:
+    """懒启动后台采集线程 (仅一次)."""
+    global _LLAMA_BG_THREAD, _LLAMA_BG_STARTED
+    if _LLAMA_BG_STARTED:
+        return
+    _LLAMA_BG_STARTED = True
+    _LLAMA_BG_THREAD = threading.Thread(
+        target=_llama_bg_worker, name="llama-collector", daemon=True,
+    )
+    _LLAMA_BG_THREAD.start()
+
+
+def snapshot() -> SimpleNamespace:
+    """返回 llama-server 状态 (Quinn 14:00: 后台线程采集, 主线程 0 阻塞).
+
+    流程:
+      - 后台线程未就绪: 同步走 _find_llama_status_minimal() (sub-ms, 不调 httpx)
+      - 后台线程已就绪: 即时读缓存; 缓存 5s 内有效
+      - 缓存陈旧 (>5s): 同步 _find_llama_status_minimal() 兜底; 主线程不会卡
+        死 (httpx 已挪到后台)
+    """
+    _ensure_llama_bg()
+    with _LLAMA_BG_LOCK:
+        cached = _LLAMA_BG.get("status")
+        ts = _LLAMA_BG.get("ts", 0.0)
+    now = time.monotonic()
+    if cached is not None and 0 < now - ts < _LLAMA_BG_STALE_LIMIT:
+        return cached
+    # 冷启动早期或后台挂掉: 同步 fallback (无 httpx, < 50ms)
+    try:
+        return _find_llama_status_minimal()
+    except Exception:
+        return SimpleNamespace(
+            state="stopped", model_name=None, quant=None, ctx_size=None,
+            port=DEFAULT_PORT, pid=None, uptime="-",
+            bind=f"{DEFAULT_HOST}:{DEFAULT_PORT}",
+            public_url=None, local_url=None,
+        )
+
+
+# ============================================================
+# Start / Stop
+# ============================================================
+
+def start(model_path: str | None = None, port: int = DEFAULT_PORT,
+          host: str = DEFAULT_HOST, ctx_size: int = DEFAULT_CTX,
+          ngl: int = 99, extra_args: list[str] | None = None,
+          extra_args_dict: dict | None = None) -> dict:
+    """Start llama-server via Popen. Returns {ok, pid, error}.
+
+    Quinn 12:00: extra_args / extra_args_dict 二选一.
+    - extra_args (旧 list[str]): 直接附加到 cmdline, 形如 ["--port", "8080", "--temp", "0.6"]
+    - extra_args_dict (新 dict): key 不含 "--" 前缀 (简洁写法),
+      后端自动加 "--" 展平为 ["--temp", "0.6", ...]. None/空串 跳过;
+      bool=True -> 仅加 flag, bool=False 跳过. key 已带 "--" 也兼容 (legacy 迁移).
+
+    Quinn 14:00: Popen 前增加 PE 校验 — 损坏占位文件直接给清晰错误,
+    避免 Windows 弹"不支持的 16 位应用程序"对话框 (NTVDM 错误).
+    """
+    exe = get_llama_server_exe()
+    if exe is None:
+        # 区分"文件不存在" vs "PE 损坏" — 调用方据此提示用户修哪条路径
+        diag = diagnose_llama_server_exe()
+        if diag.get("error"):
+            return {"ok": False, "pid": None, "error": diag["error"]}
+        return {"ok": False, "pid": None, "error": "llama-server.exe not found"}
+    if model_path is None:
+        models = list(_MODELS_DIR.rglob("*.gguf"))
+        main = [m for m in models if "mmproj" not in m.name.lower()]
+        if not main:
+            return {"ok": False, "pid": None, "error": "no main model .gguf in models/"}
+        model_path = str(main[0])
+    args = [str(exe), "-m", model_path, "--port", str(port), "--host", host,
+            "-c", str(ctx_size), "-ngl", str(ngl)]
+    model_dir = Path(model_path).parent
+    mmprojs = list(model_dir.glob("mmproj*.gguf"))
+    if mmprojs:
+        args.extend(["--mmproj", str(mmprojs[0])])
+    if extra_args_dict is not None:
+        for k, v in extra_args_dict.items():
+            if v is None or v == "":
+                continue
+            flag = _ensure_flag_prefix(k)
+            if isinstance(v, bool):
+                if v:
+                    args.append(flag)
+                continue
+            args.append(flag)
+            args.append(str(v))
+    elif extra_args:
+        args.extend(extra_args)
+    try:
+        if os.name == "nt":
+            creationflags = subprocess.CREATE_NO_WINDOW
+            proc = subprocess.Popen(args, cwd=str(model_dir),
+                                    creationflags=creationflags,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            proc = subprocess.Popen(args, cwd=str(model_dir),
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
+        return {"ok": True, "pid": proc.pid, "error": None, "exe": str(exe),
+                "args": args}
+    except Exception as e:
+        return {"ok": False, "pid": None, "error": str(e)}
+
+
+def stop() -> dict:
+    """Stop all llama-server processes. Returns {ok, killed, error}."""
+    killed = []
+    try:
+        if os.name == "nt":
+            result = subprocess.run(["taskkill", "/F", "/IM", LLAMA_PROCESS_NAME],
+                                    capture_output=True, text=True, timeout=10)
+            killed = [LLAMA_PROCESS_NAME] if result.returncode == 0 else []
+        else:
+            result = subprocess.run(["pkill", "-f", "llama-server"], capture_output=True, text=True, timeout=10)
+            killed = [LLAMA_PROCESS_NAME] if result.returncode == 0 else []
+        return {"ok": True, "killed": killed, "error": None}
+    except Exception as e:
+        return {"ok": False, "killed": killed, "error": str(e)}
+
+
+# ============================================================
+# Settings page API (called by pages/settings.py)
+# Quinn 11:35: 启动参数改 JSON 格式 — 每项有 name/key/description/default,
+#              后端在 start() 时把 dict 展平为 ["--key", "value", ...]
+# ============================================================
+
+# JSON 配置文件路径 (取代旧 cmdline_args.txt)
+_CMDLINE_FILE = Path("D:/llama-console/cmdline_args.json")
+# 旧版纯文本配置 (用于首次启动时自动迁移)
+_CMDLINE_FILE_OLD = Path("D:/llama-console/cmdline_args.txt")
+
+
+# 参数定义 schema (Quinn 12:00: key 不带 "--" 前缀, 启动时后端自动加)
+# - key:   GUI 配置名 (e.g. "temp"), 后端启动时加 "--" -> "--temp"
+# - name:  GUI 显示的中文名
+# - type:  bool / int / float / str
+# - default: 默认值 (None = 不传该 flag)
+# - description: 作用说明
+_CMDLINE_SCHEMA: list[dict] = [
+    {"key": "temp",          "name": "温度系数",
+     "type": "float", "default": 0.6,
+     "description": "采样温度, 越高越发散 (0=确定性, 1=最大随机). 推荐 0.5-0.8."},
+    {"key": "top-p",         "name": "Top-P",
+     "type": "float", "default": 0.95,
+     "description": "核采样概率累计阈值, 越高越多样. 与 temp 配合使用."},
+    {"key": "top-k",         "name": "Top-K",
+     "type": "int",   "default": 20,
+     "description": "仅从概率最高的 K 个 token 中采样. 40 常用, 越大越稳定."},
+    {"key": "repeat-penalty", "name": "重复惩罚",
+     "type": "float", "default": 1.1,
+     "description": "抑制重复输出, 1.0=无惩罚, 1.1 常用, 1.2 较强."},
+    {"key": "metrics",       "name": "启用 metrics 端点",
+     "type": "bool",  "default": True,
+     "description": "暴露 /metrics 端点, 用于控制台采集 token 统计. 关掉后无法显示速度."},
+]
+
+
+def _ensure_flag_prefix(key: str) -> str:
+    """确保 key 以 '--' 开头 (用于启动 cmdline). schema 已不带前缀, 这里统一加回.
+
+    兼容: 旧 JSON 文件可能写 "--temp", 直接保留.
+    """
+    s = str(key).strip()
+    if s.startswith("--"):
+        return s
+    if s.startswith("-"):
+        # 单 '-' (短选项) 跳过补全, 避免破坏短选项
+        return s
+    return f"--{s}"
+
+
+def _strip_flag_prefix(key: str) -> str:
+    """启动 cmdline key 反序列化到配置 dict 时用 — 去掉 '--' 前缀以便与 schema 对齐.
+
+    配置层统一无 '--'; 调用方 start() 时再用 _ensure_flag_prefix 加回.
+    """
+    s = str(key).strip()
+    if s.startswith("--"):
+        return s[2:]
+    return s
+
+
+def _schema_defaults_dict() -> dict:
+    """从 schema 生成默认参数 dict (key -> default)."""
+    return {item["key"]: item["default"] for item in _CMDLINE_SCHEMA}
+
+
+def _coerce_value(value, type_str: str):
+    """根据 schema type 转换 value, 失败抛 ValueError."""
+    if value is None:
+        return None
+    if type_str == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if s in ("true", "1", "yes", "on"):
+                return True
+            if s in ("false", "0", "no", "off"):
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raise ValueError(f"无法识别为 bool: {value!r}")
+    if type_str == "int":
+        if isinstance(value, bool):
+            raise ValueError(f"int 不能是 bool: {value!r}")
+        return int(value)
+    if type_str == "float":
+        if isinstance(value, bool):
+            raise ValueError(f"float 不能是 bool: {value!r}")
+        return float(value)
+    if type_str == "str":
+        return str(value)
+    raise ValueError(f"未知类型: {type_str}")
+
+
+def _migrate_from_legacy_text() -> dict | None:
+    """从旧 cmdline_args.txt 迁移到 JSON. 成功返回 dict, 失败/无文件返回 None.
+
+    Quinn 12:00: 旧 txt 中 key 含 "--" (e.g. "--temp"), 而 schema 已统一无前缀;
+    这里统一剥前缀成 dict (key 形如 "temp"), 并按 schema 类型 coerce.
+    """
+    if not _CMDLINE_FILE_OLD.is_file():
+        return None
+    try:
+        text = _CMDLINE_FILE_OLD.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    # 旧格式: 每行 "-ngl 99" / "--temp 0.6" (flag + value)
+    args = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # 拆分 flag 和 value (e.g. "--temp 0.6" -> ["--temp", "0.6"])
+        parts = s.split(maxsplit=1)
+        if not parts:
+            continue
+        if not parts[0].startswith("-"):
+            continue
+        if len(parts) == 2:
+            args.append((_strip_flag_prefix(parts[0]), parts[1]))
+        else:
+            # 仅 flag 无 value (e.g. "--metrics") -> metrics=True
+            args.append((_strip_flag_prefix(parts[0]), True))
+    # 合并到默认 dict, 同时按 schema 做类型 coerce
+    out = _schema_defaults_dict()
+    schema_map = {it["key"]: it for it in _CMDLINE_SCHEMA}
+    for k, v in args:
+        if k in out and k in schema_map:
+            try:
+                out[k] = _coerce_value(v, schema_map[k]["type"])
+            except (ValueError, TypeError):
+                out[k] = v  # coerce 失败保留原值
+    return out
+
+
+def load_cmdline_args_dict() -> dict:
+    """读取 JSON 配置, 不存在则从旧 txt 迁移或返回默认.
+
+    Quinn 12:00: 返回 dict 的 key 一律不带 "--" 前缀 (与 schema 对齐).
+    旧 JSON 文件可能写带前缀, 加载时统一剥掉.
+
+    Returns:
+        dict: {key: value, ...}. value 类型由 schema 决定 (int/float/bool/str).
+    """
+    if _CMDLINE_FILE.is_file():
+        try:
+            data = json.loads(_CMDLINE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                # 按 schema 做类型 coerce (JSON 文件可能被手编, 类型可能错)
+                return _coerce_dict(data)
+        except (OSError, json.JSONDecodeError):
+            pass
+    # 尝试从旧 txt 迁移
+    migrated = _migrate_from_legacy_text()
+    if migrated is not None:
+        save_cmdline_args_dict(migrated)
+        return migrated
+    # 返回默认
+    return _schema_defaults_dict()
+
+
+def _coerce_dict(data: dict) -> dict:
+    """按 schema 转换 dict 各 value 类型. 未知 key 保留原值.
+
+    Quinn 12:00: key 进来后统一剥前缀, 避免 JSON 里手编 "--temp" 与 schema "temp" 不匹配.
+    """
+    schema_map = {it["key"]: it for it in _CMDLINE_SCHEMA}
+    out: dict = {}
+    for raw_k, v in data.items():
+        k = _strip_flag_prefix(raw_k)  # 兼容旧写法 "--temp" -> "temp"
+        if k in schema_map:
+            try:
+                out[k] = _coerce_value(v, schema_map[k]["type"])
+                continue
+            except (ValueError, TypeError):
+                pass
+        out[k] = v
+    return out
+
+
+def save_cmdline_args_dict(data: dict) -> None:
+    """写入 JSON 配置. Quinn 12:00: key 一律剥前缀, 启动时再加回."""
+    _CMDLINE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    norm = {_strip_flag_prefix(k): v for k, v in data.items()}
+    _CMDLINE_FILE.write_text(
+        json.dumps(norm, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def reset_cmdline_args_dict() -> dict:
+    """重置为 schema 默认, 并落盘."""
+    data = _schema_defaults_dict()
+    save_cmdline_args_dict(data)
+    return data
+
+
+def cmdline_args_dict_to_list(data: dict) -> list[str]:
+    """把 dict 转换为 ["--flag", "value", ...] 列表, 后端 cmdline 兼容格式.
+
+    Quinn 12:00: 启动时自动给 key 加 "--" 前缀, 用户配置里写简洁的 "temp".
+    - 跳过 schema 中不存在的 key (宽容, 用户写错也不报错)
+    - None / 空串跳过
+    - bool=True  -> 仅加 flag, bool=False 跳过
+    - bool str  ("true"/"false") 同样处理
+    - 其他      -> [--flag, str(value)]
+    """
+    out: list[str] = []
+    for item in _CMDLINE_SCHEMA:
+        raw_k = item["key"]
+        if raw_k not in data:
+            continue
+        flag = _ensure_flag_prefix(raw_k)
+        v = data[raw_k]
+        if v is None or v == "":
+            continue
+        if item["type"] == "bool":
+            if isinstance(v, bool):
+                if v:
+                    out.append(flag)
+                continue
+            # 容忍 str
+            s = str(v).strip().lower()
+            if s in ("true", "1", "yes", "on"):
+                out.append(flag)
+            # else: 视为 false 跳过
+            continue
+        out.append(flag)
+        out.append(str(v))
+    return out
+
+
+def get_cmdline_schema() -> list[dict]:
+    """返回 schema 副本 (供 settings.py 渲染注释用)."""
+    return [dict(item) for item in _CMDLINE_SCHEMA]
+
+
+def validate_cmdline_args_dict(data: dict) -> tuple[bool, str]:
+    """校验 dict, 返回 (ok, error_msg).
+
+    Quinn 12:00: 已知 keys 用无前缀形式; 旧写法 "--temp" 自动剥前缀比较.
+    """
+    if not isinstance(data, dict):
+        return False, f"根必须是 JSON object, 当前是 {type(data).__name__}"
+    known = {item["key"] for item in _CMDLINE_SCHEMA}
+    schema_map = {item["key"]: item for item in _CMDLINE_SCHEMA}
+    for raw_k, v in data.items():
+        k = _strip_flag_prefix(raw_k)
+        if k not in known:
+            return False, f"未知参数: {raw_k!r} (白名单: {', '.join(sorted(known))})"
+        try:
+            _coerce_value(v, schema_map[k]["type"])
+        except (ValueError, TypeError) as e:
+            return False, f"{raw_k} 值无效: {e}"
+    return True, ""
+
+
+# ----------------------------------------------------------------
+# 向后兼容: 旧 list[str] API 仍可用, 但底层走 JSON 配置
+# ----------------------------------------------------------------
+def list_models() -> list[str]:
+    """Return all main .gguf model basenames in models dir (excludes mmproj)."""
+    if not _MODELS_DIR.is_dir():
+        return []
+    out: list[str] = []
+    for gguf in sorted(_MODELS_DIR.rglob("*.gguf")):
+        if "mmproj" in gguf.name.lower():
+            continue
+        out.append(gguf.name)
+    return out
+
+
+def current_model_path() -> str | None:
+    """Return full path of currently selected main model (or None)."""
+    models = list_models()
+    if not models:
+        return None
+    # Default = first one (matches _load_models)
+    return str(_MODELS_DIR / models[0])
+
+
+def current_cmdline_args() -> list[str]:
+    """向后兼容: 返回 list[str] (one per element, "--key value" 形式).
+
+    Quinn 11:35: 底层走 JSON 配置, 这里是给旧 callers 的便捷包装.
+    """
+    data = load_cmdline_args_dict()
+    return cmdline_args_dict_to_list(data)
+
+
+def save_cmdline_args(args: list[str]) -> None:
+    """向后兼容: 接受 list[str] (形如 ["--temp", "0.6", "--metrics"]) 写入 JSON.
+
+    Quinn 12:00: key 形如 "--temp" 自动剥前缀成 "temp" 落盘; 配置层无 "--".
+    """
+    data = _schema_defaults_dict()
+    i = 0
+    while i < len(args):
+        k = args[i]
+        if not k.startswith("-"):
+            i += 1
+            continue
+        k_norm = _strip_flag_prefix(k)  # "--temp" -> "temp"
+        if k_norm in data:
+            sch = next(it for it in _CMDLINE_SCHEMA if it["key"] == k_norm)
+            if sch["type"] == "bool":
+                # 单独 flag (无 value) -> True, 或下一个值是 -flag -> True
+                if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                    data[k_norm] = True
+                    i += 1
+                else:
+                    s = str(args[i + 1]).strip().lower()
+                    if s in ("true", "1", "yes", "on"):
+                        data[k_norm] = True
+                    else:
+                        data[k_norm] = False
+                    i += 2
+            else:
+                if i + 1 < len(args):
+                    try:
+                        data[k_norm] = _coerce_value(args[i + 1], sch["type"])
+                    except (ValueError, TypeError):
+                        data[k_norm] = sch["default"]
+                    i += 2
+                else:
+                    i += 1
+        else:
+            # 未知 key, 跳过
+            i += 1
+    save_cmdline_args_dict(data)
+
+
+def default_cmdline_args() -> list[str]:
+    """向后兼容: 返回默认 list[str]."""
+    return cmdline_args_dict_to_list(_schema_defaults_dict())
+
+
+def get_version() -> str:
+    """Alias for get_current_version() — v2 settings.py uses get_version()."""
+    return get_current_version()
+
+
+def check_latest_version() -> str:
+    """Return latest GitHub release tag (or empty on error)."""
+    rel = get_latest_github_release()
+    return rel.get("version", "") if rel.get("ok") else ""
+
+
+# ============================================================
+# Token / 性能统计 (Quinn 17:53 反馈)
+# 解析 llama-server /metrics Prometheus 端点 (需以 --metrics 启动)
+#
+# Quinn 14:00: 同样改后台线程采集 + 主线程即时读缓存 (消除 2s httpx 阻塞).
+# _collect_token_stats_now() 是实际采集函数, 由后台 llama_bg_worker 调用.
+# ============================================================
+
+def _parse_metrics(text: str) -> dict[str, float]:
+    """解析 Prometheus 文本格式 -> {metric_name: value}."""
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "{" in line:
+            # 带 label 暂时忽略 (e.g. llamacpp:n_tokens_max{slot_id="0"} ... value)
+            name_label, _, value = line.partition(" ")
+            out.setdefault(name_label.strip(), _safe_float(value))
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        out.setdefault(parts[0], _safe_float(parts[-1]))
+    return out
+
+
+def _safe_float(s: str) -> float:
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
+    """实际执行一次 /metrics 拉取 + 解析 (后台线程调用, 用 0.4s 短超时).
+
+    Quinn 14:00: 与 snapshot() 同策略 — 真正昂贵的 httpx 调用挪到后台,
+    主线程拿到的是缓存的 SimpleNamespace, 不再阻塞 2 秒.
+    """
+    ns = SimpleNamespace(
+        prompt_tokens=None, predicted_tokens=None,
+        prompt_tps=None, predicted_tps=None, available=False,
+    )
+    try:
+        with httpx.Client(timeout=0.4) as c:
+            r = c.get(f"http://127.0.0.1:{port}/metrics")
+            if r.status_code != 200:
+                return ns
+            metrics = _parse_metrics(r.text)
+            ns.prompt_tokens = int(
+                metrics.get("llamacpp:prompt_tokens_total", 0)
+                or metrics.get("llamacpp:prompt_tokens_processed_total", 0)
+                or 0
+            )
+            ns.predicted_tokens = int(
+                metrics.get("llamacpp:tokens_predicted_total", 0)
+                or metrics.get("llamacpp:tokens_predicted_generated_total", 0)
+                or 0
+            )
+            ns.prompt_tps = float(metrics.get("llamacpp:prompt_tokens_seconds", 0) or 0)
+            ns.predicted_tps = float(metrics.get("llamacpp:predicted_tokens_seconds", 0) or 0)
+            ns.available = True
+    except Exception:
+        # 连接失败 / 服务器未启 /metrics - 保持 None
+        pass
+    return ns
+
+
+def get_token_stats(port: int = DEFAULT_PORT, use_cache: bool = True) -> SimpleNamespace:
+    """读 llama-server /metrics 端点 (Quinn 14:00: 后台采集 + 主线程 0 阻塞).
+
+    返回 SimpleNamespace(
+        prompt_tokens,        # 输入 token 累积 (None 表示 /metrics 不可达)
+        predicted_tokens,     # 输出 token 累积
+        prompt_tps,           # 输入吞吐 (tokens/s, 全时均值)
+        predicted_tps,        # 输出吞吐 (tokens/s, 全时均值)  ← 速度
+        available,            # bool: 端点可用且 --metrics 已开
+    )
+
+    流程:
+      - 后台线程已就绪: 即时读缓存
+      - 后台未就绪 (启动早期): 同步 fallback (走 0.4s 短超时, 不会卡 2s)
+
+    use_cache=False 时走同步路径, 仅供调试. 内部默认 True (强制使用缓存).
+    """
+    if use_cache:
+        _ensure_llama_bg()
+        with _LLAMA_BG_LOCK:
+            cached = _LLAMA_BG.get("token_stats")
+            ts = _LLAMA_BG.get("ts", 0.0)
+        now = time.monotonic()
+        if cached is not None and 0 < now - ts < _LLAMA_BG_STALE_LIMIT:
+            return cached
+        # 后台未就绪: 同步 fallback (0.4s 超时, 仍不卡)
+        return _collect_token_stats_now(port)
+    # use_cache=False: 同步直读 (调试用, 不推荐)
+    return _collect_token_stats_now(port)
+
+
+# ============================================================
+# 启动方案 (Quinn 17:53 反馈: 启动控制改方案侧边栏)
+# ============================================================
+
+def list_schemes() -> list[dict]:
+    """返回预设启动方案列表.
+
+    每项:
+        id, name, description, icon, extra_args (启动时附加参数)
+        model (None 表示用当前选择)
+    """
+    # 内置 4 个常用方案. 未来可读取配置文件 ~/.llama_console_v2/schemes.yaml 扩展
+    return [
+        {
+            "id": "default",
+            "name": "默认",
+            "description": "标准 Q8_0 + ctx 256K",
+            "icon": "⚙",
+            "extra_args": [],
+        },
+        {
+            "id": "fast",
+            "name": "快速",
+            "description": "小 ctx + 高并发",
+            "icon": "⚡",
+            "extra_args": ["--ctx-size", "8192", "--parallel", "4", "--batch-size", "512"],
+        },
+        {
+            "id": "long",
+            "name": "长文",
+            "description": "上下文最大",
+            "icon": "📖",
+            "extra_args": ["--ctx-size", "524288", "--no-warmup"],
+        },
+        {
+            "id": "debug",
+            "name": "调试",
+            "description": "详细日志 + 流式",
+            "icon": "🔍",
+            "extra_args": ["--log-level", "debug", "--verbose"],
+        },
+    ]
+
+
+def get_scheme(scheme_id: str) -> dict | None:
+    for s in list_schemes():
+        if s["id"] == scheme_id:
+            return s
+    return None
+
+
+def start_with_scheme(scheme_id: str, model_path: str | None = None) -> dict:
+    """按指定方案启动 llama-server (替换当前运行实例)."""
+    scheme = get_scheme(scheme_id)
+    if scheme is None:
+        return {"ok": False, "pid": None, "error": f"unknown scheme: {scheme_id}"}
+    # 方案启动前先停旧实例, 避免端口冲突
+    stop()
+    return start(model_path=model_path, extra_args=scheme["extra_args"])
+
