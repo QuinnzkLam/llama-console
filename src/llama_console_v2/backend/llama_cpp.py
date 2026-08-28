@@ -24,18 +24,36 @@ from types import SimpleNamespace
 import httpx
 import psutil
 
-LLAMA_PROCESS_NAME = "llama-server.exe"
+# Quinn 11:11 (T1-A): process name detection fix.
+# Stub launcher (D:/services/llama-server/llama-server.exe, 9216B) delegates
+# 启动真 server, 真 server process 可能叫 llama-server-impl.exe 或其他
+# llama* 开头嘅名。_find_process() 必须按 pattern 抓最新嗰个, 唔再 hardcode
+# 单个 image name。
+LLAMA_PROCESS_NAME = "llama-server.exe"  # 保留向后兼容 (其他模块可能 import)
+# Known concrete names (tuple, ordered — first match wins on tie):
+_LLAMA_PROCESS_NAMES: tuple[str, ...] = (
+    "llama-server.exe",
+    "llama-server-impl.exe",
+)
+# Forward-compat: any llama*.exe (e.g. 未来 stub 改名叫 llama-server-cuda.exe)
+_LLAMA_PROCESS_PATTERN = re.compile(r"^llama.*\.exe$", re.IGNORECASE)
 DEFAULT_PORT = 18605
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_CTX = 262144
 GITHUB_API = "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest"
 
 # v2 local compiled binary location
-_V2_BIN_DIR = Path("D:/llama-console/src/llama.cpp/build/bin/Release")
+_V2_BIN_DIR = Path("D:/llama-console/llama.cpp/build/bin")
 # v1 precompiled fallback (Quinn's existing setup)
 _V1_FALLBACK = Path("D:/services/llama-server/llama-server.exe")
 # v2 models dir
 _MODELS_DIR = Path("D:/llama-console/models")
+
+# Quinn 23:18: 4.2 chat-template fix — v0.3.0 内建 default template 唔认 Qwen3.8-27B
+# 嘅 chat format, /v1/chat/completions 返空。强制 bind 落官方 jinja
+# (从 GGUF tokenizer.chat_template 抽出, 9993 bytes, 含 vision/developer/think/tool)。
+# 启动时硬编码, 用户唔可以喺 settings page 误删。
+_CHAT_TEMPLATE_FILE = Path("D:/llama-console/chat_templates/qwen.jinja")
 
 
 # ============================================================
@@ -253,13 +271,30 @@ def is_update_available() -> dict:
 # ============================================================
 
 def _find_process() -> psutil.Process | None:
+    """Find the most recently started llama* process.
+
+    Quinn 11:11 (T1-A): stub launcher delegates to 真 server (impl.exe 或其他),
+    唔再 hardcode "llama-server.exe" 单个名。改用 regex `^llama` + 按 create_time
+    倒序排, 揀最新嗰个 — 兼容 stub launcher + 直 spawn 两种路径。
+    """
+    candidates: list[tuple[float, psutil.Process]] = []
     for p in psutil.process_iter(["name", "pid", "create_time"]):
         try:
-            if p.info["name"] and p.info["name"].lower() == LLAMA_PROCESS_NAME.lower():
-                return p
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            name = p.info["name"]
+            if not name:
+                continue
+            lname = name.lower()
+            # Match concrete known names OR any llama*.exe (forward-compat)
+            if lname in _LLAMA_PROCESS_NAMES or _LLAMA_PROCESS_PATTERN.match(name):
+                create_time = p.info["create_time"] or 0.0
+                candidates.append((create_time, p))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-    return None
+    if not candidates:
+        return None
+    # Newest first (最大 create_time); tie-break by largest pid (更晚启嘅)
+    candidates.sort(key=lambda cp: (cp[0], cp[1].info["pid"]), reverse=True)
+    return candidates[0][1]
 
 
 def _format_uptime(sec: int) -> str:
@@ -269,6 +304,47 @@ def _format_uptime(sec: int) -> str:
     m = (sec % 3600) // 60
     s = sec % 60
     return f"{h}h {m:02d}m {s:02d}s"
+
+
+# Quinn 14:00: 检测局域网 IP (不发包, UDP connect trick).
+# 用于 local_url 显示真实 LAN 地址 (e.g. http://192.168.50.167:18605),
+# 取代硬编码 127.0.0.1.
+_LAN_IP_CACHE: dict = {"ip": None, "ts": 0.0}
+_LAN_IP_TTL = 300.0  # s (5 分钟缓存)
+_LAN_IP_TIMEOUT = 0.3  # s
+
+
+def _get_lan_ip() -> str | None:
+    """返回本机局域网 IP (UDP socket connect trick, 不发包).
+
+    Quinn 14:00: 核弹机实测返回 192.168.50.167.
+    """
+    now = time.monotonic()
+    cached_ip = _LAN_IP_CACHE.get("ip")
+    cached_ts = _LAN_IP_CACHE.get("ts", 0.0)
+    if cached_ip and now - cached_ts < _LAN_IP_TTL:
+        return cached_ip
+    import socket
+    ip = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(_LAN_IP_TIMEOUT)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        except Exception:
+            pass
+        finally:
+            s.close()
+    except Exception:
+        pass
+    # 即使本次失败也更新 ts, 避免反复尝试
+    _LAN_IP_CACHE["ts"] = now
+    if ip:
+        _LAN_IP_CACHE["ip"] = ip
+        return ip
+    # 失败: 返回上次缓存值 (可能为 None, 也可能为旧值)
+    return cached_ip
 
 
 def _probe_health(port: int) -> str:
@@ -287,8 +363,36 @@ def _probe_health(port: int) -> str:
     return "loading"
 
 
+_QUANT_RE = re.compile(r"[-.](Q\d+_\d+|[Ff]\d+|[Kk]\-[Ss]+|[Ii]Q\d+_[A-Z]+)$")
+
+
+def _display_model_name(name: str) -> str:
+    """从原始 .gguf 文件名剥出干净显示名 (去掉 .gguf + 尾部 quant token).
+
+    Quinn 16:11: 显示给用户看的 title 要简洁 — "Qwen3.8-27B-Q8_0.gguf" -> "Qwen3.8-27B".
+    Examples:
+        "Qwen3.8-27B-Q8_0.gguf"             -> "Qwen3.8-27B"
+        "Llama-3.1-8B-Instruct.Q8_0.gguf"   -> "Llama-3.1-8B-Instruct"
+        "model.gguf"                         -> "model"
+    """
+    if not name:
+        return name
+    n = name
+    # 先去 .gguf 后缀 (大小写不敏感)
+    if n.lower().endswith(".gguf"):
+        n = n[:-5]
+    # 尾部 quant token 匹配 (使用现有 quant regex, 但锚定到尾部 $)
+    m = _QUANT_RE.search(n)
+    if m:
+        n = n[: m.start()]
+    return n
+
+
 def _get_model_info() -> tuple[str | None, str | None, int | None]:
-    """Return (model_name, quant, ctx_size) by reading process cmdline."""
+    """Return (display_name, quant, ctx_size) by reading process cmdline.
+
+    Quinn 16:11: display_name 已剥掉 .gguf + 尾部 quant, 形如 "Qwen3.8-27B".
+    """
     proc = _find_process()
     if proc is None:
         return None, None, None
@@ -296,21 +400,27 @@ def _get_model_info() -> tuple[str | None, str | None, int | None]:
         cmdline = proc.cmdline()
     except (psutil.AccessDenied, psutil.NoSuchProcess):
         return None, None, None
-    model = None
+    raw_model = None
     quant = None
     ctx = None
     for i, arg in enumerate(cmdline):
         if arg == "-m" and i + 1 < len(cmdline):
-            model = Path(cmdline[i + 1]).name
-        elif arg == "--port" and i + 1 < len(cmdline):
-            try: ctx = int(cmdline[i + 1])
-            except ValueError: pass
-    if model and "-" in model:
+            raw_model = Path(cmdline[i + 1]).name
+        # ctx-size 有两种写法: "--ctx-size <N>" 或 "-c <N>" (短选项)
+        elif arg in ("--ctx-size", "-c") and i + 1 < len(cmdline):
+            try:
+                ctx = int(cmdline[i + 1])
+            except ValueError:
+                pass
+    display_name = _display_model_name(raw_model) if raw_model else None
+    if raw_model and "-" in raw_model:
         # Detect quant from filename like "Qwen3.8-27B-Q8_0.gguf"
-        m = re.search(r"-(Q\d+_\d+|[Ff]\d+|[Kk]\-[Ss]+|[Ii]Q\d+_[A-Z]+)", model)
+        # 先剥 .gguf 再匹配尾部 quant (避免 .gguf 干扰 $ 错位)
+        stem = raw_model[:-5] if raw_model.lower().endswith(".gguf") else raw_model
+        m = _QUANT_RE.search(stem)
         if m:
-            quant = m.group(1)
-    return model, quant, ctx
+            quant = m.group(1).lstrip("-").lstrip(".")
+    return display_name, quant, ctx
 
 
 def get_status() -> SimpleNamespace:
@@ -330,7 +440,7 @@ def get_status() -> SimpleNamespace:
             public_url=None, local_url=None,
         )
     try:
-        uptime_sec = int(time.time() - proc.create_time)
+        uptime_sec = int(time.time() - proc.create_time())
     except Exception:
         uptime_sec = 0
     model, quant, ctx = _get_model_info()
@@ -339,8 +449,8 @@ def get_status() -> SimpleNamespace:
         model_name=model, quant=quant, ctx_size=ctx,
         port=port, pid=proc.pid, uptime=_format_uptime(uptime_sec),
         bind=f"{DEFAULT_HOST}:{port}",
-        public_url=f"http://frp.example.com:{port}/v1",  # populated by frp.snapshot()
-        local_url=f"http://127.0.0.1:{port}",
+        public_url=None,  # populated by console layer merging frp snapshot
+        local_url=f"http://{_get_lan_ip() or '127.0.0.1'}:{port}",
     )
 
 
@@ -379,7 +489,8 @@ def _llama_bg_worker() -> None:
             except Exception:
                 tok = SimpleNamespace(
                     prompt_tokens=None, predicted_tokens=None,
-                    prompt_tps=None, predicted_tps=None, available=False,
+                    prompt_tps=None, predicted_tps=None,
+                    available=False, stale=False, stale_ts=None,
                 )
             with _LLAMA_BG_LOCK:
                 _LLAMA_BG["status"] = status
@@ -403,7 +514,7 @@ def _find_llama_status_minimal() -> SimpleNamespace:
             public_url=None, local_url=None,
         )
     try:
-        uptime_sec = int(time.time() - proc.create_time)
+        uptime_sec = int(time.time() - proc.create_time())
     except Exception:
         uptime_sec = 0
     model, quant, ctx = _get_model_info()
@@ -412,8 +523,8 @@ def _find_llama_status_minimal() -> SimpleNamespace:
         model_name=model, quant=quant, ctx_size=ctx,
         port=port, pid=proc.pid, uptime=_format_uptime(uptime_sec),
         bind=f"{DEFAULT_HOST}:{port}",
-        public_url=f"http://frp.example.com:{port}/v1",
-        local_url=f"http://127.0.0.1:{port}",
+        public_url=None,
+        local_url=f"http://{_get_lan_ip() or '127.0.0.1'}:{port}",
     )
 
 
@@ -491,6 +602,10 @@ def start(model_path: str | None = None, port: int = DEFAULT_PORT,
         model_path = str(main[0])
     args = [str(exe), "-m", model_path, "--port", str(port), "--host", host,
             "-c", str(ctx_size), "-ngl", str(ngl)]
+    # Quinn 23:18 (4.2): 强制 --chat-template-file, 唔可以 miss
+    # 4.1b smoke 发现: --jinja 用 v0.3.0 内建 default 唔认 Qwen3.8-27B → content 空
+    if _CHAT_TEMPLATE_FILE.is_file():
+        args.extend(["--chat-template-file", str(_CHAT_TEMPLATE_FILE)])
     model_dir = Path(model_path).parent
     mmprojs = list(model_dir.glob("mmproj*.gguf"))
     if mmprojs:
@@ -529,10 +644,31 @@ def stop() -> dict:
     killed = []
     try:
         if os.name == "nt":
-            result = subprocess.run(["taskkill", "/F", "/IM", LLAMA_PROCESS_NAME],
-                                    capture_output=True, text=True, timeout=10)
-            killed = [LLAMA_PROCESS_NAME] if result.returncode == 0 else []
+            # Quinn 11:11 (T1-A): taskkill 唔支持 glob, 必须列出具体 image name。
+            # 先 kill 已知名字 (impl.exe 可能由 stub spawn), 再 fallback 到主名。
+            for name in _LLAMA_PROCESS_NAMES:
+                result = subprocess.run(
+                    ["taskkill", "/F", "/IM", name],
+                    capture_output=True, text=True, timeout=10,
+                )
+                # taskkill returncode 0 = 杀到, 128 = 搵唔到 (仍算 OK)
+                if result.returncode == 0:
+                    killed.append(name)
+            # Forward-compat: 如果当时有其他 llama*.exe 跑紧, 主动探一下并 kill
+            for p in psutil.process_iter(["name"]):
+                try:
+                    pname = p.info["name"]
+                    if pname and _LLAMA_PROCESS_PATTERN.match(pname) and pname not in killed:
+                        result = subprocess.run(
+                            ["taskkill", "/F", "/IM", pname],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        if result.returncode == 0:
+                            killed.append(pname)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
         else:
+            # POSIX: pkill -f 支持 regex, 直接用
             result = subprocess.run(["pkill", "-f", "llama-server"], capture_output=True, text=True, timeout=10)
             killed = [LLAMA_PROCESS_NAME] if result.returncode == 0 else []
         return {"ok": True, "killed": killed, "error": None}
@@ -924,15 +1060,57 @@ def _safe_float(s: str) -> float:
         return 0.0
 
 
+# Quinn 16:11 (R12): token 统计持久化 — 服务关闭后能继续显示上一次数字.
+_TOKEN_STATE_FILE = Path("D:/llama-console/token_stats_state.json")
+
+
+def _save_token_state(ns: SimpleNamespace) -> None:
+    """把当前 token 统计快照写盘 (供服务关闭后读取显示). 写盘失败只 pass."""
+    try:
+        _TOKEN_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "prompt_tokens": ns.prompt_tokens,
+            "predicted_tokens": ns.predicted_tokens,
+            "prompt_tps": ns.prompt_tps,
+            "predicted_tps": ns.predicted_tps,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),  # ISO8601 local time
+        }
+        _TOKEN_STATE_FILE.write_text(
+            json.dumps(payload, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _load_token_state() -> dict | None:
+    """读上次的 token 统计快照. 失败返 None."""
+    if not _TOKEN_STATE_FILE.is_file():
+        return None
+    try:
+        data = json.loads(_TOKEN_STATE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return None
+
+
 def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
     """实际执行一次 /metrics 拉取 + 解析 (后台线程调用, 用 0.4s 短超时).
 
     Quinn 14:00: 与 snapshot() 同策略 — 真正昂贵的 httpx 调用挪到后台,
     主线程拿到的是缓存的 SimpleNamespace, 不再阻塞 2 秒.
+
+    Quinn 16:11 (R12): 新增 stale / stale_ts 字段 — 服务关闭后还能显示上一次数字.
+      - available=True  : stale=False, stale_ts=None
+      - available=False : 若盘上有 state → 带旧数字 + stale=True + stale_ts=ISO 串
+                          若盘上无 state → 全 None + stale=False, stale_ts=None
     """
     ns = SimpleNamespace(
         prompt_tokens=None, predicted_tokens=None,
-        prompt_tps=None, predicted_tps=None, available=False,
+        prompt_tps=None, predicted_tps=None,
+        available=False, stale=False, stale_ts=None,
     )
     try:
         with httpx.Client(timeout=0.4) as c:
@@ -953,9 +1131,21 @@ def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
             ns.prompt_tps = float(metrics.get("llamacpp:prompt_tokens_seconds", 0) or 0)
             ns.predicted_tps = float(metrics.get("llamacpp:predicted_tokens_seconds", 0) or 0)
             ns.available = True
+            ns.stale = False
+            ns.stale_ts = None
+            # Quinn 16:11: 写盘以便后续关闭后能继续显示
+            _save_token_state(ns)
     except Exception:
-        # 连接失败 / 服务器未启 /metrics - 保持 None
-        pass
+        # 连接失败 / 服务器未启 /metrics — 尝试读上次的快照
+        saved = _load_token_state()
+        if saved:
+            ns.prompt_tokens = saved.get("prompt_tokens")
+            ns.predicted_tokens = saved.get("predicted_tokens")
+            ns.prompt_tps = saved.get("prompt_tps")
+            ns.predicted_tps = saved.get("predicted_tps")
+            ns.available = False
+            ns.stale = True
+            ns.stale_ts = saved.get("ts")
     return ns
 
 

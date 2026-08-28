@@ -316,12 +316,17 @@ def _get_gpus() -> list[dict[str, Any]]:
         return []
     try:
         # Quinn 09:00 (第二轮): 加 temperature.memory 字段拿 VRAM 显存温度
+        # Worker 2026-08-28 17:59: 加 creationflags=CREATE_NO_WINDOW，避免后台采集线程
+        #   每 2s spawn nvidia-smi 时弹出黑底白字 console 窗口（与 llama_cpp.py 约定一致）。
+        kwargs = dict(capture_output=True, text=True, timeout=5)
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         result = subprocess.run(
             [candidates[0],
              "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,"
              "temperature.gpu,temperature.memory",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
+            **kwargs,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return []

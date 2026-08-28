@@ -30,6 +30,10 @@ def _is_frpc_running() -> bool:
 def _parse_proxy_for_port(path: Path, target_port: int) -> tuple[str, int | None, int | None, str | None]:
     """Parse TOML-like config to find proxy matching target local_port.
     Returns (tunnel_name, remote_port, local_port, server_addr).
+
+    Quinn 16:11 (R12): top-level `serverAddr` 读取后保存为 `top_server_addr`,
+    进入 [[proxies]] block 时从 `top_server_addr` 取, 避免 `cur_server = server_addr`
+    (此时外层 server_addr 还是 None) 清掉 top-level 值.
     """
     tunnel_name = "-"
     remote_port: int | None = None
@@ -43,7 +47,9 @@ def _parse_proxy_for_port(path: Path, target_port: int) -> tuple[str, int | None
     cur_local: int | None = None
     cur_remote: int | None = None
     cur_type: str | None = None
-    cur_server = server_addr
+    # Quinn 16:11: 顶部 serverAddr 独立保存, proxy block 切换时从这里继承
+    top_server_addr: str | None = None
+    cur_server = top_server_addr
 
     def _flush() -> None:
         nonlocal tunnel_name, remote_port, local_port, server_addr
@@ -70,7 +76,8 @@ def _parse_proxy_for_port(path: Path, target_port: int) -> tuple[str, int | None
             cur_local = None
             cur_remote = None
             cur_type = None
-            cur_server = server_addr
+            # Quinn 16:11: 顶部 serverAddr 继承, 不要清掉
+            cur_server = top_server_addr
             in_proxies = True
             continue
         if "=" not in line:
@@ -89,6 +96,8 @@ def _parse_proxy_for_port(path: Path, target_port: int) -> tuple[str, int | None
         elif k == "name":
             cur_name = v
         elif k == "serveraddr":
+            # Quinn 16:11: 顶部 serverAddr 同时保存到 top_server_addr 和 cur_server
+            top_server_addr = v
             cur_server = v
     if cur_local is not None:
         _flush()

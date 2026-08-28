@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import theme as t
-from .pages.console import ConsolePage
-from .pages.settings import SettingsPage
+from llama_console_v2 import theme as t
+from llama_console_v2.pages.console import ConsolePage
+from llama_console_v2.pages.settings import SettingsPage
 
 
 class SidebarButton(QPushButton):
