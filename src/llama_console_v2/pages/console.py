@@ -26,16 +26,16 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .. import theme as t
-from ..widgets.card import Card
-from ..widgets.chip_icon import ChipSvgIcon
-from ..widgets.status_pill import StatusPill
-from ..widgets.progress_bar import ProgressBar
-from ..widgets.page_chrome import PageHeader, PageFooter
-from ..backend import status as backend_status
-from ..backend import hardware as backend_hardware
-from ..backend import frp as backend_frp
-from ..backend import llama_cpp as backend_llama
+from llama_console_v2 import theme as t
+from llama_console_v2.widgets.card import Card
+from llama_console_v2.widgets.chip_icon import ChipSvgIcon
+from llama_console_v2.widgets.status_pill import StatusPill
+from llama_console_v2.widgets.progress_bar import ProgressBar
+from llama_console_v2.widgets.page_chrome import PageHeader, PageFooter
+from llama_console_v2.backend import status as backend_status
+from llama_console_v2.backend import hardware as backend_hardware
+from llama_console_v2.backend import frp as backend_frp
+from llama_console_v2.backend import llama_cpp as backend_llama
 
 
 # ============================================================
@@ -127,7 +127,7 @@ def _label(text: str, kind: str = "body", bold: bool = False, color: str = "text
 #   Quinn 12:00 创建 (R9 GPU 型号防 wrap 撑高) + 16:11 修复 color/sizeHint
 #   Quinn 16:11 (R11): 移到 widgets 包供 Card 等共享, 这里做 alias 别名.
 # ============================================================
-from ..widgets.elide_label import ElideLabel as _ElideLabel
+from llama_console_v2.widgets.elide_label import ElideLabel as _ElideLabel
 
 
 # ============================================================
@@ -283,8 +283,8 @@ class ConsolePage(QWidget):
         self._model_name_lbl.setMinimumWidth(0)  # 允许被拉伸
         body.addWidget(self._model_name_lbl)
 
-        # 模型副信息
-        self._model_sub_lbl = _label("Q8_0 · ctx 262144 · port 18605",
+        # 模型副信息 — Quinn 16:11 (R12): 删掉 quant, 改 ctx + port
+        self._model_sub_lbl = _label("ctx - · port -",
                                       "subtitle", color="text_secondary")
         t.min_h(self._model_sub_lbl, t.row_height("sm"))  # 30
         body.addWidget(self._model_sub_lbl)
@@ -293,7 +293,7 @@ class ConsolePage(QWidget):
         body.addSpacing(t.scaled(t.space("2")))
 
         # Key/Value grid (3 行)
-        from ..widgets.key_value import KeyValueGrid
+        from llama_console_v2.widgets.key_value import KeyValueGrid
         self._status_grid = KeyValueGrid(
             [
                 ("运行时间", "-"),
@@ -356,7 +356,7 @@ class ConsolePage(QWidget):
         # 16:08: padding 已由 Card.body_layout 内置，调用方无需再设
         # 16:08: spacing 由 Card.body_layout 内置覆盖
 
-        from ..widgets.key_value import KeyValueGrid
+        from llama_console_v2.widgets.key_value import KeyValueGrid
         self._frp_grid = KeyValueGrid(
             [
                 ("隧道名", "-"),
@@ -686,7 +686,7 @@ class ConsolePage(QWidget):
     # ========================================================================
     def _on_stop(self) -> None:
         """保留兼容入口: 供 MainWindow 显式调用"""
-        from ..backend import llama_cpp as backend_llama
+        from llama_console_v2.backend import llama_cpp as backend_llama
         backend_llama.stop()
 
     # ========================================================================
@@ -721,8 +721,10 @@ class ConsolePage(QWidget):
         state_map = {
             "stopped":  ("已停止", "stopped"),
             "starting": ("加载中", "loading"),
+            "loading":  ("加载中", "loading"),
             "running":  ("运行中", "running"),
             "error":    ("错误", "error"),
+            "failed":   ("启动失败", "failed"),  # Quinn T1-D
         }
         text, state = state_map.get(snap.state, (snap.state, "stopped"))
         self._status_pill.set_text(text)
@@ -730,15 +732,12 @@ class ConsolePage(QWidget):
 
         # Model name
         _set_if_diff(self._model_name_lbl, snap.model_name or "-")
-        # Quinn 09:00: llama.cpp 版本拼接, 跳空
-        ver = getattr(snap, "llama_cpp_version", None)
+        # Quinn 16:11 (R12): 副标题改为 ctx + port (删除 quant)
         parts: list[str] = []
-        if snap.quant:
-            parts.append(str(snap.quant))
-        if ver and ver not in ("-", "unknown", "not built"):
-            parts.append(f"llama.cpp {ver}")
-        elif ver:
-            parts.append(f"llama.cpp {ver}")
+        if snap.ctx_size:
+            parts.append(f"ctx {snap.ctx_size}")
+        if snap.port:
+            parts.append(f"port {snap.port}")
         _set_if_diff(self._model_sub_lbl, " · ".join(parts) if parts else "-")
 
         # Key/Value
@@ -747,7 +746,17 @@ class ConsolePage(QWidget):
         self._status_grid.set_value(2, snap.bind or "-")
 
         # URLs
-        _set_if_diff(self._public_url_lbl, snap.public_url or "-")
+        # Quinn 16:11 (R12): public_url 由 frp 快照合并 — llama backend 不再
+        # 硬编码假地址; llama 运行中且 frp 已连接时显示真实公网地址
+        public_url = snap.public_url
+        if not public_url and snap.state in ("running", "starting", "loading"):
+            try:
+                _frp_snap = backend_frp.snapshot()
+                if getattr(_frp_snap, "connected", False) and getattr(_frp_snap, "public_url", None):
+                    public_url = _frp_snap.public_url
+            except Exception:
+                pass
+        _set_if_diff(self._public_url_lbl, public_url or "-")
         _set_if_diff(self._local_url_lbl, snap.local_url or "-")
 
     def _refresh_hardware(self) -> None:
@@ -909,16 +918,17 @@ class ConsolePage(QWidget):
     # ========================================================================
     def _refresh_token(self) -> None:
         snap = backend_llama.get_token_stats()
+        # 千分位格式化 token 数
+        def _fmt(n: int | None) -> str:
+            if n is None:
+                return "-"
+            if n < 1000:
+                return str(n)
+            if n < 1_000_000:
+                return f"{n/1000:.1f}K"
+            return f"{n/1_000_000:.2f}M"
+
         if snap.available:
-            # 千分位格式化 token 数
-            def _fmt(n: int | None) -> str:
-                if n is None:
-                    return "-"
-                if n < 1000:
-                    return str(n)
-                if n < 1_000_000:
-                    return f"{n/1000:.1f}K"
-                return f"{n/1_000_000:.2f}M"
             self._token_in_lbl.setText(_fmt(snap.prompt_tokens))
             self._token_out_lbl.setText(_fmt(snap.predicted_tokens))
             self._token_speed_lbl.setText(
@@ -930,9 +940,24 @@ class ConsolePage(QWidget):
                 f"启动至今: 输入 {snap.prompt_tokens or 0:,} · 输出 {snap.predicted_tokens or 0:,} · 合计 {total:,} tokens"
             )
         else:
-            # /metrics 不可用 (服务未启/未开 --metrics)
-            self._token_in_lbl.setText("-")
-            self._token_out_lbl.setText("-")
-            self._token_speed_lbl.setText("-")
-            # Quinn 16:11 (R11): 删掉「提示」文字 (按用户要求), 卡片只剩数字占位"
-            self._token_total_lbl.setText("")
+            # Quinn 16:11 (R12): 服务未运行时, 有 stale 值就显示最后统计
+            has_stale = getattr(snap, "stale", False) and snap.prompt_tokens is not None
+            if has_stale:
+                self._token_in_lbl.setText(_fmt(snap.prompt_tokens))
+                self._token_out_lbl.setText(_fmt(snap.predicted_tokens))
+                self._token_speed_lbl.setText(
+                    f"{snap.predicted_tps:.1f}" if snap.predicted_tps else "-"
+                )
+                # stale_ts ISO string "YYYY-MM-DDTHH:MM:SS" → 取 HH:MM:SS 部分
+                stale_ts = getattr(snap, "stale_ts", "") or ""
+                hh_mm_ss = stale_ts.split("T", 1)[1][:8] if "T" in stale_ts else stale_ts
+                self._token_total_lbl.setText(
+                    f"最后统计 {hh_mm_ss} · 服务未连接"
+                )
+            else:
+                # /metrics 不可用 且无历史快照 (首次启动 / 未服务过)
+                self._token_in_lbl.setText("-")
+                self._token_out_lbl.setText("-")
+                self._token_speed_lbl.setText("-")
+                # Quinn 16:11 (R11): 删掉「提示」文字 (按用户要求), 卡片只剩数字占位"
+                self._token_total_lbl.setText("")

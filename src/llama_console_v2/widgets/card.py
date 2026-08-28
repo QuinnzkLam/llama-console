@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QFont
 
-from .. import theme as t
-from .elide_label import ElideLabel
+from llama_console_v2 import theme as t
+from llama_console_v2.widgets.elide_label import ElideLabel
 
 
 class Card(QFrame):

@@ -49,7 +49,8 @@ FONT_FAMILY_MONO = '"JetBrains Mono", "Cascadia Code", Consolas, "Courier New", 
 BASE_FONT_SIZE = {
     "xs":   11,   # 14→11: 副信息/标签
     "sm":   13,   # 16→13: 数据值/按钮
-    "base": 14,   # 17→14: 副数据
+    "base": 14,
+    "md":   14,   # 17.5*1: error banner body (Quinn 11:56 fix FONT_SIZE["md"] missing)   # 17→14: 副数据
     "lg":   15,   # 20→15: 卡片模型名/子卡标题（Quinn 16:08 反馈：标题过粗）
     "xl":   17,   # 24→17: 卡片父标题（Quinn 16:08 反馈：2xl 过粗，降到 xl+bold）
     "2xl":  20,   # 28→20: 大段标题（保留备用）
@@ -261,6 +262,7 @@ STATUS_COLORS = {
     "loading":     "warning",
     "stopped":     "text_muted",
     "error":       "danger",
+    "failed":      "danger",  # Quinn T1-D: backend start ok 但 health_reachable=False
     "online":      "success",
     "offline":     "text_muted",
     "connected":   "success",

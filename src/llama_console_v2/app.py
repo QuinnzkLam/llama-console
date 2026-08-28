@@ -13,8 +13,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase, QPalette, QColor
 from PySide6.QtWidgets import QApplication
 
-from . import theme as t
-from .main_window import MainWindow
+from llama_console_v2 import theme as t
+from llama_console_v2.main_window import MainWindow
 
 
 def _set_app_attr(app: QApplication, attr_name: str, value) -> None:

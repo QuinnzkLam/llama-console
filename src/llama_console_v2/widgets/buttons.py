@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QPushButton
 from PySide6.QtGui import QFont, QIcon
 
-from .. import theme as t
+from llama_console_v2 import theme as t
 
 
 class PrimaryButton(QPushButton):

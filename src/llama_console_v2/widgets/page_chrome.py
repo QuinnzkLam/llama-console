@@ -6,8 +6,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 from PySide6.QtGui import QFont
 
-from .. import theme as t
-from .status_pill import StatusPill
+from llama_console_v2 import theme as t
+from llama_console_v2.widgets.status_pill import StatusPill
 
 
 class PageHeader(QWidget):

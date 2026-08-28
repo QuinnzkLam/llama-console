@@ -16,7 +16,7 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget
 
-from .. import theme as t
+from llama_console_v2 import theme as t
 
 
 # ============================================================

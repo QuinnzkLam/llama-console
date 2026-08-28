@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 from PySide6.QtGui import QFont
 
-from .. import theme as t
+from llama_console_v2 import theme as t
 
 
 class ProgressBar(QWidget):

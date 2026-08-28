@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .. import theme as t
-from ..backend import llama_cpp as backend_llama
+from llama_console_v2 import theme as t
+from llama_console_v2.backend import llama_cpp as backend_llama
 
 
 # ============================================================
@@ -94,8 +94,10 @@ def _state_to_key(state: str) -> str:
     return {
         "running":  "running",
         "loading":  "loading",
+        "starting": "loading",
         "stopped":  "stopped",
         "error":    "error",
+        "failed":   "failed",  # Quinn T1-D: backend start ok 但 health_reachable=False
     }.get(state, "stopped")
 
 
@@ -204,12 +206,25 @@ class ServerControlSidebar(QWidget):
     # Internal
     # ============================================================
     def _refresh_state(self) -> None:
-        """读取 backend_llama.snapshot().state 切换按钮 enabled."""
+        """读取 backend_llama.snapshot().state 切换按钮 enabled.
+
+        Quinn T1-D: 如果有 _force_state 覆盖 (mark_failed 或 3s pending 触发),
+        强制用它作状态去 render. 一旦 backend snapshot state 追上 (比如切到
+        running 或 stopped), 清覆盖, 恢复按 backend 走.
+        """
         try:
             snap = backend_llama.snapshot()
-            state = snap.state
+            backend_state = snap.state
         except Exception:
-            state = "stopped"
+            backend_state = "stopped"
+
+        # Quinn T1-D: _force_state override 仅作 UI 提示用, 一旦 backend 追上
+        # (running/stopped/error) 就让 backend 接手.
+        force = getattr(self, "_force_state", None)
+        if force and backend_state in ("running", "stopped", "error"):
+            self._force_state = None
+            force = None
+        state = force or backend_state
 
         if state == self._last_state:
             return  # 无变化不刷 UI
@@ -222,6 +237,10 @@ class ServerControlSidebar(QWidget):
         elif state in ("loading", "starting"):
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(True)
+        elif state == "failed":
+            # Quinn T1-D: 启动失败 — 两者都可点 (允许强制重启 / 停止清理)
+            self._start_btn.setEnabled(True)
+            self._stop_btn.setEnabled(True)
         else:  # stopped / error / unknown
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
@@ -230,8 +249,10 @@ class ServerControlSidebar(QWidget):
         state_text_map = {
             "running":  ("运行中",   "success"),
             "loading":  ("加载中",   "warning"),
+            "starting": ("加载中",   "warning"),
             "stopped":  ("未启动",   "text_muted"),
             "error":    ("错误",     "danger"),
+            "failed":   ("启动失败", "danger"),  # Quinn T1-D
         }
         text, color_key = state_text_map.get(state, ("未启动", "text_muted"))
         color_hex = t.color(color_key)
@@ -245,12 +266,49 @@ class ServerControlSidebar(QWidget):
         )
 
     def _on_start_clicked(self) -> None:
-        """启动 llama-server: 读取 current_cmdline_args() 作为 extra_args."""
+        """启动 llama-server: 读取 current_cmdline_args() 作为 extra_args.
+
+        Quinn T1-D: 同时启动一个 3s  pending-failure timer — 如果 3s 后 backend
+        snapshot 仍处于 loading/starting 状态 (launcher stub 起咗但真 server 死咗),
+        本地 force pill 为「启动失败」, 避免 UI 永远 stuck 在「加载中」。
+        Backend T1-B 亦会同时 set state="failed", 本地 timer 只是 UX 额外保护.
+        """
         cb = getattr(self, "_on_start_cb", None)
         if cb is not None:
             cb()
         else:
             print("[ServerControlSidebar] no start callback registered")
+        # Arm 3s pending-failure check (single-shot)
+        self._start_pending = True
+        timer = getattr(self, "_pending_fail_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._check_pending_failure)
+            self._pending_fail_timer = timer
+        timer.start(3000)
+
+    def _check_pending_failure(self) -> None:
+        """3s 后检查: 如果仍 loading 且未有其他 state 转变, force "failed" pill.
+
+        Quinn T1-D: backend 起 launcher stub 通常 <500ms 完成, 但真 llama-server
+        要加载 27B 模型可能需 30s+. 不过如果 3s 后 state 仍 loading 且 _start_pending
+        标志未被清, 即代表 backend 拒绝进一步推进 (健康检查失败). 本地 force 提示.
+        """
+        if not getattr(self, "_start_pending", False):
+            return  # 已 refresh 到其他状态
+        try:
+            snap = backend_llama.snapshot()
+            cur_state = snap.state
+        except Exception:
+            cur_state = "stopped"
+        if cur_state in ("loading", "starting"):
+            # 仍在 loading — force pill 为 failed (override 直到 backend 追上)
+            self._last_state = None  # 让 _refresh_state 重跑
+            self._force_state = "failed"
+            self._refresh_state()
+        # 清掉 _start_pending (但保留 _force_state 让 pill 继续显示 failed)
+        self._start_pending = False
 
     def _on_stop_clicked(self) -> None:
         cb = getattr(self, "_on_stop_cb", None)
@@ -258,6 +316,19 @@ class ServerControlSidebar(QWidget):
             cb()
         else:
             print("[ServerControlSidebar] no stop callback registered")
+        # Quinn T1-D: stop 后清 pending-failure, 避免停完又触发 failed 显示
+        self._start_pending = False
+        self._force_state = None
+
+    def mark_failed(self) -> None:
+        """外部 (MainWindow) 调用: 启动返回 ok 但 health 失败时立即 pill 切到 failed.
+
+        Quinn T1-D: 比 3s timer 更早让用户见到错误, 无需等 _refresh_state 轮询.
+        """
+        self._last_state = None
+        self._force_state = "failed"
+        self._start_pending = False
+        self._refresh_state()
 
     # ============================================================
     # Public API

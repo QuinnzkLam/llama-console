@@ -27,11 +27,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import theme as t
-from .pages.console import ConsolePage
-from .pages.settings import SettingsPage
-from .widgets.server_control import ServerControlSidebar
-from .backend import llama_cpp as backend_llama
+from llama_console_v2 import theme as t
+from llama_console_v2.pages.console import ConsolePage
+from llama_console_v2.pages.settings import SettingsPage
+from llama_console_v2.widgets.server_control import ServerControlSidebar
+from llama_console_v2.backend import llama_cpp as backend_llama
 
 
 class SidebarButton(QPushButton):
@@ -126,8 +126,25 @@ class MainWindow(QMainWindow):
         central.setStyleSheet("background: transparent; border: none;")
         self.setCentralWidget(central)
 
+        # Quinn T1-D: 中央 widget 改为 VBox — 顶部预留 error banner,
+        # 下面才是原来的 sidebar + stack HBox. banner 平时 hide(), 出错时 show().
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # --- Error banner (顶部, 默认隐藏) ---
+        self._error_banner = self._build_error_banner()
+        self._error_banner.hide()
+        root_layout.addWidget(self._error_banner)
+
+        # Body container: 包住原来的 sidebar + stack HBox, 保留原 margin
+        body = QWidget()
+        body.setObjectName("CentralBody")
+        body.setStyleSheet("background: transparent; border: none;")
+        root_layout.addWidget(body, 1)
+
         # Root layout = sidebar + stacked
-        layout = QHBoxLayout(central)
+        layout = QHBoxLayout(body)
         layout.setContentsMargins(
             t.scaled(t.space("6")), t.scaled(t.space("6")),
             t.scaled(t.space("6")), t.scaled(t.space("6"))
@@ -224,6 +241,11 @@ class MainWindow(QMainWindow):
 
         Quinn 11:35: 启动参数改 JSON 格式后, 用 extra_args_dict 走新路径,
         后端 start() 自动展平 dict 为 ["--flag", "value", ...].
+
+        Quinn T1-D: 当 backend start() return ok=True 但 health_reachable=False
+        (即 launcher stub 起咗但 llama-server 真系死咩), 弹出顶部 error banner
+        告知用户检查 log. 之前呢种 case 完全静默, 状态 pill 永远「未启动」,
+        用户唔知道咩事.
         """
         try:
             extra_args_dict = backend_llama.load_cmdline_args_dict()
@@ -234,9 +256,21 @@ class MainWindow(QMainWindow):
         result = backend_llama.start(extra_args_dict=extra_args_dict)
         ok = result.get("ok", False)
         err = result.get("error")
+        health_reachable = result.get("health_reachable", True)
+        log_path = result.get("log_path") or "unknown"
         if not ok:
+            # 后端明确报错 — 显示 banner 后唔继续 refresh (后台其实已停)
             print(f"[main_window] start failed: {err}")
+            self._show_error_banner(log_path, err or "start returned ok=False")
+            # 通知 sidebar pill 切到 failed (override)
+            self._server_ctrl.refresh()
             return
+        if not health_reachable:
+            # T1-B 新语义: launcher 起咗但 health endpoint 3s 内唔 ready
+            # → 用户必须睇 log 知咩事
+            print(f"[main_window] start ok but health unreachable, log: {log_path}")
+            self._show_error_banner(log_path, err or "health endpoint not reachable in 3s")
+            self._server_ctrl.mark_failed()  # 立即 pill 切到「启动失败」
         # 切到控制台 + 多次刷新 (启动 → loading → running)
         self._switch_to(0)
         self._server_ctrl.refresh()  # 立即更新 pill 到 loading
@@ -252,6 +286,123 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._console_page.refresh)
         QTimer.singleShot(1500, self._console_page.refresh)
         QTimer.singleShot(3500, self._console_page.refresh)
+
+    # ============================================================
+    # Quinn T1-D: Error banner (顶部失败提示)
+    # ============================================================
+    def _build_error_banner(self) -> QFrame:
+        """构建顶部红色错误 banner (QFrame). 平时 hide(), 出错才 show().
+
+        Layout: [⚠] [消息]  [stretch]  [log path]  [✕]
+        Hover 整个 banner 显示完整 log path tooltip.
+        """
+        banner = QFrame()
+        banner.setObjectName("ErrorBanner")
+        banner.setFrameShape(QFrame.Shape.NoFrame)
+        banner.setStyleSheet(
+            f"""
+            QFrame#ErrorBanner {{
+                background-color: {t.color('danger')};
+                border: none;
+                border-bottom: 1px solid rgba(0, 0, 0, 0.25);
+            }}
+            QFrame#ErrorBanner QLabel {{
+                color: #ffffff;
+                background: transparent;
+                border: none;
+            }}
+            QFrame#ErrorBanner QPushButton {{
+                background: transparent;
+                color: #ffffff;
+                border: none;
+                padding: 0 {t.scaled(6)}px;
+                font-weight: 700;
+                font-size: {t.FONT_SIZE["md"]}pt;
+            }}
+            QFrame#ErrorBanner QPushButton:hover {{
+                background-color: rgba(0, 0, 0, 0.20);
+                border-radius: {t.radius("sm")}px;
+            }}
+            """
+        )
+        t.fixed_h(banner, 36, floor=32)
+
+        lay = QHBoxLayout(banner)
+        lay.setContentsMargins(
+            t.scaled(t.space("4")), 0,
+            t.scaled(t.space("3")), 0,
+        )
+        lay.setSpacing(t.scaled(t.space("3")))
+
+        icon = QLabel("\u26a0")  # ⚠
+        icon_font = QFont()
+        icon_font.setPointSize(t.FONT_SIZE["md"])
+        icon_font.setBold(True)
+        icon.setFont(icon_font)
+        lay.addWidget(icon)
+
+        self._error_banner_text = QLabel("llama-server 启动失败")
+        text_font = QFont()
+        text_font.setPointSize(t.FONT_SIZE["sm"])
+        text_font.setBold(True)
+        self._error_banner_text.setFont(text_font)
+        lay.addWidget(self._error_banner_text)
+
+        lay.addStretch(1)
+
+        self._error_banner_log = QLabel("")
+        log_font = QFont()
+        log_font.setPointSize(t.FONT_SIZE["xs"])
+        self._error_banner_log.setFont(log_font)
+        # log path 允许多行 + ellipsis (过窄时省略中间)
+        self._error_banner_log.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self._error_banner_log.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        # log label 本身都有独立 tooltip = 完整路径
+        lay.addWidget(self._error_banner_log, 1)
+
+        # banner 本身作为 hover target — install event filter 让整个 banner 都显示
+        # log path tooltip. 较简单做法: 直接喺 _show_error_banner 里调
+        # self._error_banner.setToolTip(log_path) (拎住个 QFrame), 已够.
+
+        close_btn = QPushButton("\u2715")  # ✕
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setFixedSize(t.scaled(24), t.scaled(24))
+        close_btn.setToolTip("关闭")
+        close_btn.clicked.connect(self._hide_error_banner)
+        lay.addWidget(close_btn)
+
+        return banner
+
+    def _show_error_banner(self, log_path: str, error_msg: str) -> None:
+        """顶部 banner 显示启动失败信息 + log path. Idempotent: 重複调冇问题.
+
+        Quinn T1-D: 配合 backend return dict 新 key `health_reachable=False` 调用.
+        """
+        log_path = log_path or "unknown"
+        # banner 主文本拼上 error_msg (如果有)
+        if error_msg and error_msg != "unknown":
+            self._error_banner_text.setText(
+                f"llama-server 启动失败: {error_msg}"
+            )
+        else:
+            self._error_banner_text.setText("llama-server 启动失败, 请检查 log")
+        # log path label: 仅显示文件名 (太长会占满), hover 完整路径
+        short = log_path
+        if len(short) > 60:
+            # 留前 30 + … + 后 27
+            short = short[:30] + "…" + short[-27:]
+        self._error_banner_log.setText(f"log: {short}")
+        # tooltip: 整条 banner 都看得见完整路径
+        self._error_banner_log.setToolTip(log_path)
+        self._error_banner_text.setToolTip(log_path)
+        self._error_banner.setToolTip(log_path)
+        self._error_banner_log.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._error_banner.show()
+
+    def _hide_error_banner(self) -> None:
+        self._error_banner.hide()
 
     def _switch_to(self, index: int) -> None:
         self._stack.setCurrentIndex(index)

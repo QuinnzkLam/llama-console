@@ -28,12 +28,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QFont
 
-from .. import theme as t
-from ..widgets.card import Card
-from ..widgets.buttons import PrimaryButton, OutlineButton
-from ..widgets.json_highlighter import CmdlineJsonHighlighter
-from ..widgets.page_chrome import PageHeader
-from ..backend import llama_cpp as backend_llama
+from llama_console_v2 import theme as t
+from llama_console_v2.widgets.card import Card
+from llama_console_v2.widgets.buttons import PrimaryButton, OutlineButton
+from llama_console_v2.widgets.json_highlighter import CmdlineJsonHighlighter
+from llama_console_v2.widgets.page_chrome import PageHeader
+from llama_console_v2.backend import llama_cpp as backend_llama
 
 
 # ============================================================
