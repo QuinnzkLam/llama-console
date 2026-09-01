@@ -592,6 +592,32 @@ def start(model_path: str | None = None, port: int = DEFAULT_PORT,
     Quinn 14:00: Popen 前增加 PE 校验 — 损坏占位文件直接给清晰错误,
     避免 Windows 弹"不支持的 16 位应用程序"对话框 (NTVDM 错误).
     """
+    # 2026-09-01 (T3 fix): 先把 config 层的 positional keys 拆出来映射,
+    # 防止 model/mmproj/ngl/ctx_size/image_min_tokens 被当成 --model/--ngl 直通
+    cfg_model: str | None = None
+    cfg_mmproj: str | None = None
+    if extra_args_dict is not None:
+        extra_args_dict, _pos = _split_positional_keys(extra_args_dict)
+        if _pos.get("model"):
+            cfg_model = str(_pos["model"])
+        if _pos.get("mmproj"):
+            cfg_mmproj = str(_pos["mmproj"])
+        if _pos.get("ngl") is not None:
+            try:
+                ngl = int(_pos["ngl"])
+            except (TypeError, ValueError):
+                pass
+        if _pos.get("ctx_size") is not None:
+            try:
+                ctx_size = int(_pos["ctx_size"])
+            except (TypeError, ValueError):
+                pass
+        if _pos.get("image_min_tokens") is not None:
+            try:
+                extra_args_dict = dict(extra_args_dict)
+                extra_args_dict["image-min-tokens"] = int(_pos["image_min_tokens"])
+            except (TypeError, ValueError):
+                pass
     exe = get_llama_server_exe()
     if exe is None:
         # 区分"文件不存在" vs "PE 损坏" — 调用方据此提示用户修哪条路径
@@ -599,6 +625,13 @@ def start(model_path: str | None = None, port: int = DEFAULT_PORT,
         if diag.get("error"):
             return {"ok": False, "pid": None, "error": diag["error"]}
         return {"ok": False, "pid": None, "error": "llama-server.exe not found"}
+    # 2026-09-01 (T3 fix): config "model" 字段 -> -m 路径 (支持裸文件名或绝对路径)
+    if model_path is None and cfg_model:
+        _cm = Path(cfg_model)
+        if not _cm.is_absolute():
+            _cm = _MODELS_DIR / cfg_model
+        if _cm.is_file():
+            model_path = str(_cm)
     if model_path is None:
         models = list(_MODELS_DIR.rglob("*.gguf"))
         main = [m for m in models if "mmproj" not in m.name.lower()]
@@ -612,9 +645,20 @@ def start(model_path: str | None = None, port: int = DEFAULT_PORT,
     if _CHAT_TEMPLATE_FILE.is_file():
         args.extend(["--chat-template-file", str(_CHAT_TEMPLATE_FILE)])
     model_dir = Path(model_path).parent
-    mmprojs = list(model_dir.glob("mmproj*.gguf"))
-    if mmprojs:
-        args.extend(["--mmproj", str(mmprojs[0])])
+    # 2026-09-01 (T3 fix): config "mmproj" 字段优先, 否则 glob 第一个
+    _mmproj_pick: str | None = None
+    if cfg_mmproj:
+        _cp = Path(cfg_mmproj)
+        if not _cp.is_absolute():
+            _cp = _MODELS_DIR / cfg_mmproj
+        if _cp.is_file():
+            _mmproj_pick = str(_cp)
+    if _mmproj_pick is None:
+        mmprojs = list(model_dir.glob("mmproj*.gguf"))
+        if mmprojs:
+            _mmproj_pick = str(mmprojs[0])
+    if _mmproj_pick:
+        args.extend(["--mmproj", _mmproj_pick])
     if extra_args_dict is not None:
         for k, v in extra_args_dict.items():
             if v is None or v == "":
@@ -823,6 +867,32 @@ def _coerce_value(value, type_str: str):
     raise ValueError(f"未知类型: {type_str}")
 
 
+# 2026-09-01 (T3 fix): GUI 配置层的 positional keys — 有语义映射, 不能当 "--key value"
+# 直通传给 llama-server (旧逻辑把 config 里的 model/ngl/ctx_size 等变成 --model/--ngl/
+# --ctx_size, 其中 --ngl 被 llama-server v0.3.0 拒绝: "error: invalid argument: --ngl";
+# 白名单校验也对 "model" 报 "unknown parameter: 'model'").
+# 映射: model -> -m 路径; mmproj -> --mmproj; ngl -> -ngl; ctx_size -> -c;
+#       image_min_tokens -> --image-min-tokens.
+_POSITIONAL_KEYS = {"model": str, "mmproj": str, "ngl": int, "ctx_size": int, "image_min_tokens": int}
+
+
+def _split_positional_keys(data: dict) -> tuple[dict, dict]:
+    """拆出 positional config keys. 返回 (flag_keys, positional_dict).
+
+    flag_keys 保留原始 key 写法 (交给原 extra_args_dict 展平逻辑);
+    positional_dict 的 key 已剥前缀并按 _POSITIONAL_KEYS 归类.
+    """
+    flags: dict = {}
+    pos: dict = {}
+    for k, v in data.items():
+        kk = _strip_flag_prefix(k)
+        if kk in _POSITIONAL_KEYS:
+            pos[kk] = v
+        else:
+            flags[k] = v
+    return flags, pos
+
+
 def _migrate_from_legacy_text() -> dict | None:
     """从旧 cmdline_args.txt 迁移到 JSON. 成功返回 dict, 失败/无文件返回 None.
 
@@ -973,12 +1043,20 @@ def validate_cmdline_args_dict(data: dict) -> tuple[bool, str]:
     """
     if not isinstance(data, dict):
         return False, f"根必须是 JSON object, 当前是 {type(data).__name__}"
-    known = {item["key"] for item in _CMDLINE_SCHEMA}
+    known = {item["key"] for item in _CMDLINE_SCHEMA} | set(_POSITIONAL_KEYS)
     schema_map = {item["key"]: item for item in _CMDLINE_SCHEMA}
     for raw_k, v in data.items():
         k = _strip_flag_prefix(raw_k)
         if k not in known:
             return False, f"未知参数: {raw_k!r} (白名单: {', '.join(sorted(known))})"
+        # 2026-09-01 (T3 fix): positional keys 用自身类型校验, 不再报 unknown parameter
+        if k in _POSITIONAL_KEYS:
+            t = _POSITIONAL_KEYS[k]
+            if t is int and (isinstance(v, bool) or not isinstance(v, int)):
+                return False, f"{raw_k} 需为整数, 当前 {v!r}"
+            if t is str and not isinstance(v, str):
+                return False, f"{raw_k} 需为字符串, 当前 {v!r}"
+            continue
         try:
             _coerce_value(v, schema_map[k]["type"])
         except (ValueError, TypeError) as e:
