@@ -16,11 +16,19 @@ Quinn 11:04 (第六轮): 按钮图标改为 setIcon(QIcon) 几何矢量渲染
 - 新方案: QPainter 画 QPixmap (居中三角形/正方形), 通过 setIcon() 设置,
   Qt 自动按统一 baseline 对齐图标 + 文字, 各按钮视觉中心一致
 """
+import time
+
 from PySide6.QtCore import Qt, QTimer, QRect
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget,
 )
+
+# 2026-09-01 (bug fix): 启动后进程「真死」判定宽限期.
+# 27B 模型加载 2-4 min, 期间进程一直活着 (snapshot.state=loading, pid 非空),
+# 所以只要进程活着就绝不报失败. 这里只对「进程已消失」且已过宽限 (避免慢 spawn
+# 误判) 才标 failed. 参数错/端口冲突等真失败进程会在 ~2s 内消失, 远小于宽限期.
+_PENDING_GRACE_S = 15
 
 from llama_console_v2 import theme as t
 from llama_console_v2.backend import llama_cpp as backend_llama
@@ -221,7 +229,16 @@ class ServerControlSidebar(QWidget):
         # Quinn T1-D: _force_state override 仅作 UI 提示用, 一旦 backend 追上
         # (running/stopped/error) 就让 backend 接手.
         force = getattr(self, "_force_state", None)
-        if force and backend_state in ("running", "stopped", "error"):
+        if force == "failed":
+            # 2026-09-01 (bug fix): failed override 唔可以被 backend=stopped 清除。
+            # 旧逻辑 "force and backend in (running,stopped,error) -> clear" 会把
+            # 刚启动就死嘅进程 (stopped) 又显示成「未启动」, 令「启动失败」永远
+            # 弹唔出。这里只有 backend 确认 running (真启动成功) 先清 failed;
+            # backend=stopped 时保留 failed (启动后进程消失 = 启动失败, 唔算未启动)。
+            if backend_state == "running":
+                self._force_state = None
+                force = None
+        elif force and backend_state in ("running", "stopped", "error"):
             self._force_state = None
             force = None
         state = force or backend_state
@@ -268,47 +285,75 @@ class ServerControlSidebar(QWidget):
     def _on_start_clicked(self) -> None:
         """启动 llama-server: 读取 current_cmdline_args() 作为 extra_args.
 
-        Quinn T1-D: 同时启动一个 3s  pending-failure timer — 如果 3s 后 backend
-        snapshot 仍处于 loading/starting 状态 (launcher stub 起咗但真 server 死咗),
-        本地 force pill 为「启动失败」, 避免 UI 永远 stuck 在「加载中」。
-        Backend T1-B 亦会同时 set state="failed", 本地 timer 只是 UX 额外保护.
+        Quinn 2026-09-01 (bug fix): 移除「3s 强制 failed」误报。
+        根因: 旧逻辑在点启动后 3s 单发 timer 检查, 若 snapshot 仍 loading 就
+        force pill 为「启动失败」。但 27B 模型实际加载需 2-4 分钟, 3s 时进程
+        明明活着只是 health 未 ready → 被误报成启动失败。
+
+        新逻辑: 改为周期检查(每 2s), 只在「进程真死」(pid 消失且 health 不达)
+        且过了短宽限(避免慢 spawn 误判) 后才报 failed; 进程存活期间永远保持
+        「加载中」, 由 1.5s 轮询自然过渡到「运行中」。
         """
         cb = getattr(self, "_on_start_cb", None)
         if cb is not None:
             cb()
         else:
             print("[ServerControlSidebar] no start callback registered")
-        # Arm 3s pending-failure check (single-shot)
+        # Arm pending check (repeating, 每 2s) — 只有进程真死先报 failed
         self._start_pending = True
+        self._pending_start_ts = time.monotonic()
         timer = getattr(self, "_pending_fail_timer", None)
         if timer is None:
             timer = QTimer(self)
-            timer.setSingleShot(True)
             timer.timeout.connect(self._check_pending_failure)
             self._pending_fail_timer = timer
-        timer.start(3000)
+        timer.setInterval(2000)
+        timer.start()
 
     def _check_pending_failure(self) -> None:
-        """3s 后检查: 如果仍 loading 且未有其他 state 转变, force "failed" pill.
+        """周期检查: 区分「加载中」vs「真失败」.
 
-        Quinn T1-D: backend 起 launcher stub 通常 <500ms 完成, 但真 llama-server
-        要加载 27B 模型可能需 30s+. 不过如果 3s 后 state 仍 loading 且 _start_pending
-        标志未被清, 即代表 backend 拒绝进一步推进 (健康检查失败). 本地 force 提示.
+        - running          → 启动成功, 清 pending
+        - loading + 进程活  → 合法加载期 (2-4 min), 保持「加载中」, 唔报失败
+        - stopped + 已过宽限 → 进程真死 (参数错/端口冲突/加载 abort), 报「启动失败」
+        - stopped + 未过宽限 → 可能慢 spawn, 继续等
         """
         if not getattr(self, "_start_pending", False):
-            return  # 已 refresh 到其他状态
+            self._stop_pending_timer()
+            return
         try:
             snap = backend_llama.snapshot()
             cur_state = snap.state
+            pid = snap.pid
         except Exception:
             cur_state = "stopped"
-        if cur_state in ("loading", "starting"):
-            # 仍在 loading — force pill 为 failed (override 直到 backend 追上)
-            self._last_state = None  # 让 _refresh_state 重跑
+            pid = None
+        if cur_state == "running":
+            # 启动成功 (health 200) — 结束 pending
+            self._start_pending = False
+            self._force_state = None
+            self._stop_pending_timer()
+            return
+        if cur_state in ("loading", "starting") and pid is not None:
+            # 进程仍活着, 只是 health 未 ready — 合法加载期, 唔报失败
+            return
+        if cur_state == "stopped":
+            # 进程已消失: 过了短宽限才算真失败 (避免慢 spawn 误判)
+            if time.monotonic() - self._pending_start_ts < _PENDING_GRACE_S:
+                return
+            # 真失败 (bad arg / 端口冲突 / 加载 abort) → 报 failed
+            self._start_pending = False
+            self._stop_pending_timer()
+            self._last_state = None
             self._force_state = "failed"
             self._refresh_state()
-        # 清掉 _start_pending (但保留 _force_state 让 pill 继续显示 failed)
-        self._start_pending = False
+            return
+        # error / 其他 — 保持原状, 等 refresh
+
+    def _stop_pending_timer(self) -> None:
+        timer = getattr(self, "_pending_fail_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
 
     def _on_stop_clicked(self) -> None:
         cb = getattr(self, "_on_stop_cb", None)
@@ -316,9 +361,10 @@ class ServerControlSidebar(QWidget):
             cb()
         else:
             print("[ServerControlSidebar] no stop callback registered")
-        # Quinn T1-D: stop 后清 pending-failure, 避免停完又触发 failed 显示
+        # stop 后清 pending-failure, 避免停完又触发 failed 显示
         self._start_pending = False
         self._force_state = None
+        self._stop_pending_timer()
 
     def mark_failed(self) -> None:
         """外部 (MainWindow) 调用: 启动返回 ok 但 health 失败时立即 pill 切到 failed.

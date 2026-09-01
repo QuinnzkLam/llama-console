@@ -44,8 +44,10 @@ GITHUB_API = "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest"
 
 # v2 local compiled binary location
 _V2_BIN_DIR = Path("D:/llama-console/llama.cpp/build/bin")
-# v1 precompiled fallback (Quinn's existing setup)
-_V1_FALLBACK = Path("D:/services/llama-server/llama-server.exe")
+# 2026-09-01 (搬迁): v1 rollback binary 原在 D:/services/llama-server/ (将移除),
+# 不再引用该目录. 统一以 v2 本地编译二进制为唯一来源, fallback 指向同一 v2 路径
+# (实际取第一个有效 PE, 不影响逻辑).
+_V1_FALLBACK = Path("D:/llama-console/llama.cpp/build/bin/llama-server.exe")
 # v2 models dir
 _MODELS_DIR = Path("D:/llama-console/models")
 
@@ -672,25 +674,83 @@ def start(model_path: str | None = None, port: int = DEFAULT_PORT,
             args.append(str(v))
     elif extra_args:
         args.extend(extra_args)
+    # 2026-09-01 (bug fix): GUI 自 spawn 的 llama-server 也写 stderr log, 供真失败
+    # (bad arg / 端口冲突 / 加载 abort) 时用户睇到具体报错. 位置同搬迁后 bat 的 log 一致.
+    log_file = None
+    log_path = None
+    try:
+        _log_dir = Path("D:/llama-console/logs")
+        _log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = str(_log_dir / "llama_win_gui.log")
+        log_file = open(log_path, "w", encoding="utf-8", errors="replace")
+    except Exception:
+        log_file = None
+        log_path = None
     try:
         if os.name == "nt":
             creationflags = subprocess.CREATE_NO_WINDOW
             proc = subprocess.Popen(args, cwd=str(model_dir),
                                     creationflags=creationflags,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    stdout=log_file or subprocess.DEVNULL,
+                                    stderr=subprocess.STDOUT)
         else:
             proc = subprocess.Popen(args, cwd=str(model_dir),
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    stdout=log_file or subprocess.DEVNULL,
+                                    stderr=subprocess.STDOUT,
                                     start_new_session=True)
         return {"ok": True, "pid": proc.pid, "error": None, "exe": str(exe),
-                "args": args}
+                "args": args, "log_path": log_path,
+                "health_reachable": True}
     except Exception as e:
-        return {"ok": False, "pid": None, "error": str(e)}
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                pass
+        return {"ok": False, "pid": None, "error": str(e), "log_path": log_path,
+                "health_reachable": False}
+
+
+def _elevated_kill_llama() -> bool:
+    """Kill an elevated (admin-integrity) llama-server via UAC elevation.
+
+    2026-09-01 (Franky): 根因 — schtask \\Hedanji-Llama-Start 用
+    RunLevel=HighestAvailable 起 llama-server, 该实例为 admin integrity
+    (High). GUI (nlama.exe) 以普通用户 (Medium) 运行, taskkill /F 对 High
+    进程返回 Access Denied → 「无法暂停」. 这里用 Start-Process -Verb RunAs
+    触发一次 UAC 提升, 由 taskkill 以管理员身份结束残留的 elevated llama.
+
+    Returns:
+        True 若成功发起 (UAC 已被接受 / 无需确认); False 若失败或用户取消.
+    """
+    try:
+        # -Verb RunAs 触发 UAC; taskkill /T 同时结束进程树
+        ps = (
+            'powershell -NoProfile -ExecutionPolicy Bypass -Command '
+            '"Start-Process -FilePath taskkill.exe '
+            '-ArgumentList \'/F\',\'/IM\',\'llama-server.exe\',\'/T\' '
+            '-Verb RunAs -WindowStyle Hidden"'
+        )
+        subprocess.run(ps, shell=True, timeout=25, capture_output=True, text=True)
+        # Start-Process -Verb RunAs 本身返回即代表用户已接受 UAC
+        return True
+    except Exception:
+        return False
 
 
 def stop() -> dict:
-    """Stop all llama-server processes. Returns {ok, killed, error}."""
+    """Stop all llama-server processes. Returns {ok, killed, error, elevated, residual}.
+
+    2026-09-01 (Franky): 修复「GUI 停唔到非自己 spawn 嘅 llama-server」.
+    - schtask 以 HighestAvailable 起嘅 llama 是 admin integrity (High),
+      Medium GUI 嘅 taskkill /F 会 Access Denied.
+    - 先做普通 taskkill (可杀 Medium llama); 若仍有 llama 残留 (elevated),
+      再触发一次 UAC 提升的 taskkill (elevated fallback).
+    - 返回字段: killed=[已杀 image name], elevated=bool 是否用了 UAC 提升,
+      residual=bool 是否仍有 llama 残留 (GUI 可据此提示).
+    """
     killed = []
+    elevated = False
     try:
         if os.name == "nt":
             # Quinn 11:11 (T1-A): taskkill 唔支持 glob, 必须列出具体 image name。
@@ -720,9 +780,33 @@ def stop() -> dict:
             # POSIX: pkill -f 支持 regex, 直接用
             result = subprocess.run(["pkill", "-f", "llama-server"], capture_output=True, text=True, timeout=10)
             killed = [LLAMA_PROCESS_NAME] if result.returncode == 0 else []
-        return {"ok": True, "killed": killed, "error": None}
+        # --- Elevated fallback (2026-09-01 v2): 只有确认 llama 真系卡住先 UAC ---
+        # taskkill /F 对 27B 模型需数秒释放 VRAM/上下文先真正退出; 对 elevated
+        # (High) 实例则直接 AccessDenied (killed 为空). 所以唔好依赖 killed 是否非空,
+        # 统一轮询 _find_process() 最多 ~8s:
+        #   - 8s 内退出 → 正常关停, 唔弹 UAC
+        #   - 8s 后仍在 → 疑似 elevated / 卡死 → 触发 UAC 提升再 kill
+        residual = False
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if _find_process() is None:
+                break
+            time.sleep(1.0)
+        else:
+            residual = True
+        if residual:
+            elevated = _elevated_kill_llama()
+            # 再等一次让 elevated taskkill 生效
+            time.sleep(2.0)
+            if _find_process() is None:
+                residual = False
+                if "llama-server.exe (elevated)" not in killed:
+                    killed.append("llama-server.exe (elevated)")
+        return {"ok": True, "killed": killed, "elevated": elevated,
+                "residual": residual, "error": None}
     except Exception as e:
-        return {"ok": False, "killed": killed, "error": str(e)}
+        return {"ok": False, "killed": killed, "elevated": elevated,
+                "residual": True, "error": str(e)}
 
 
 # ============================================================
@@ -773,6 +857,11 @@ _CMDLINE_SCHEMA: list[dict] = [
     {"key": "split-mode",    "name": "层切分模式",
      "type": "str",   "default": "tensor",
      "description": "多 GPU 层切分方式, 核弹机 2x3090 用 tensor."},
+    {"key": "fit",            "name": "参数自动适配",
+     "type": "str",   "default": "off",
+     "description": "--fit on/off. v0.3.0 默认 on, 对 tensor 模式会 abort "
+                     "(llama_params_fit is not implemented for SPLIT_MODE_TENSOR). "
+                     "必须 off 才能用 tensor 启动."},
     {"key": "flash-attn",    "name": "Flash Attention",
      "type": "str",   "default": "on",
      "description": "闪存注意力 on/off/auto, 开咗省速省时."},

@@ -299,8 +299,36 @@ class MainWindow(QMainWindow):
 
         2026-08-31 (B1): stop() llama-server 之后自动调 backend_frp.stop_frpc()
         — 同步收 frpc tunnel. 幂等: 冇 frpc 喺跑 → ok=True, killed=[].
+
+        2026-09-01 (Franky): 修复「停唔到非自己 spawn 嘅 llama」—
+        - 检查 backend_llama.stop() 返回值 (elevated/residual), 唔再静默.
+        - 若 stop 失败 / 仍有 llama 残留 (schtask 起嘅 elevated 实例),
+          弹错误 banner 明确告知用户, 并提示需要 UAC 授权.
+        - elevated=True 时提示「已通过管理员授权停止」.
         """
-        backend_llama.stop()
+        try:
+            stop_res = backend_llama.stop()
+        except Exception as e:
+            print(f"[main_window] stop exception: {e}")
+            stop_res = {"ok": False, "error": str(e)}
+        stop_ok = stop_res.get("ok", True)
+        residual = stop_res.get("residual", False)
+        elevated = stop_res.get("elevated", False)
+        stop_err = stop_res.get("error") or ""
+        # 停 llama-server 失败 / 仍有残留 → 明确提示 (唔再静默)
+        if not stop_ok or residual:
+            msg = stop_err or "无法停止 llama-server"
+            if elevated:
+                msg = "已发起管理员授权停止, 但 llama-server 仍未能终止, 请检查"
+            elif residual:
+                msg = ("llama-server 由计划任务以管理员权限启动, 普通权限无法停止; "
+                       "请在系统弹窗中允许管理员授权")
+            print(f"[main_window] stop issue: {msg}")
+            self._show_error_banner("", msg)
+        elif elevated:
+            # 通过 UAC 提升才停到 — 提示用户已用管理员权限
+            print("[main_window] stop done via UAC elevation")
+            self._show_error_banner("", "已通过管理员授权停止 llama-server")
         # B1: 同步停 frpc
         frp_res = backend_frp.stop_frpc()
         if frp_res.get("ok"):
