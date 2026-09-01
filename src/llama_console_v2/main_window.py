@@ -32,6 +32,7 @@ from llama_console_v2.pages.console import ConsolePage
 from llama_console_v2.pages.settings import SettingsPage
 from llama_console_v2.widgets.server_control import ServerControlSidebar
 from llama_console_v2.backend import llama_cpp as backend_llama
+from llama_console_v2.backend import frp as backend_frp  # 2026-08-31 (B1): GUI 启停同步启停 frp
 
 
 class SidebarButton(QPushButton):
@@ -246,6 +247,10 @@ class MainWindow(QMainWindow):
         (即 launcher stub 起咗但 llama-server 真系死咩), 弹出顶部 error banner
         告知用户检查 log. 之前呢种 case 完全静默, 状态 pill 永远「未启动」,
         用户唔知道咩事.
+
+        2026-08-31 (B1): start() 成功 (ok=True) 后自动调 backend_frp.start_frpc()
+        — 同步起 frpc tunnel. 幂等: frpc 已经在跑 → no-op. 错误全捕获
+        (frp.start_frpc 唔 throw), 所以 frp 失败都唔会 crash GUI.
         """
         try:
             extra_args_dict = backend_llama.load_cmdline_args_dict()
@@ -265,6 +270,16 @@ class MainWindow(QMainWindow):
             # 通知 sidebar pill 切到 failed (override)
             self._server_ctrl.refresh()
             return
+        # B1: llama-server start ok → 同步起 frpc (幂等, 安全)
+        frp_res = backend_frp.start_frpc()
+        if frp_res.get("ok"):
+            if frp_res.get("already_running"):
+                print(f"[main_window] FRP 已在运行 (pid {frp_res.get('pid')})")
+            else:
+                print(f"[main_window] FRP 已启动 (pid {frp_res.get('pid')})")
+        else:
+            # frp 失败唔影响 llama-server 启动结果, 只 log 提醒
+            print(f"[main_window] FRP 启动失败: {frp_res.get('error')}")
         if not health_reachable:
             # T1-B 新语义: launcher 起咗但 health endpoint 3s 内唔 ready
             # → 用户必须睇 log 知咩事
@@ -280,8 +295,22 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(7000, self._console_page.refresh)
 
     def _on_sidebar_stop(self) -> None:
-        """侧边栏「停止」按钮."""
+        """侧边栏「停止」按钮.
+
+        2026-08-31 (B1): stop() llama-server 之后自动调 backend_frp.stop_frpc()
+        — 同步收 frpc tunnel. 幂等: 冇 frpc 喺跑 → ok=True, killed=[].
+        """
         backend_llama.stop()
+        # B1: 同步停 frpc
+        frp_res = backend_frp.stop_frpc()
+        if frp_res.get("ok"):
+            killed = frp_res.get("killed") or []
+            if killed:
+                print(f"[main_window] FRP 已停止 (killed pids: {killed})")
+            else:
+                print("[main_window] FRP 未运行, 无需停止")
+        else:
+            print(f"[main_window] FRP 停止失败: {frp_res.get('error')}")
         self._server_ctrl.refresh()  # 立即更新 pill 到 stopped
         QTimer.singleShot(0, self._console_page.refresh)
         QTimer.singleShot(1500, self._console_page.refresh)
