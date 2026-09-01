@@ -1,4 +1,4 @@
-﻿"""v2 backend/llama_cpp.py - llama-server 进程/启动/停止 + version + update check.
+"""v2 backend/llama_cpp.py - llama-server 进程/启动/停止 + version + update check.
 
 架构独立: 唔依赖 v1 backend。直接用 psutil + httpx + subprocess + GitHub API。
 
@@ -352,9 +352,14 @@ def _probe_health(port: int) -> str:
 
     Quinn 14:00: timeout 2.0 -> 0.4s (localhost loopback 通常 < 5ms, 400ms
     已经足够给慢启动留余量; server 完全 down 时快速失败不阻塞主线程).
+
+    2026-08-31 (A1): 加 trust_env=False — loopback httpx 唔可以走系统代理.
+    背景: Windows 系统代理 (127.0.0.1:33210) 会劫持 127.0.0.1:18605 嘅请求,
+    导致 GUI 永远「加载中」(probe 等到 timeout 先 fallback).
+    加 trust_env 后 httpx 直接连 socket, 唔查 HTTP_PROXY/HTTPS_PROXY env.
     """
     try:
-        with httpx.Client(timeout=0.4) as c:
+        with httpx.Client(timeout=0.4, trust_env=False) as c:
             r = c.get(f"http://127.0.0.1:{port}/health")
             if r.status_code == 200 and r.json().get("status") == "ok":
                 return "running"
@@ -683,7 +688,7 @@ def stop() -> dict:
 # ============================================================
 
 # JSON 配置文件路径 (取代旧 cmdline_args.txt)
-_CMDLINE_FILE = Path("D:/llama-console/cmdline_args.json")
+_CMDLINE_FILE = Path("D:/llama-console/config/qwen3.8-27b.json")
 # 旧版纯文本配置 (用于首次启动时自动迁移)
 _CMDLINE_FILE_OLD = Path("D:/llama-console/cmdline_args.txt")
 
@@ -695,21 +700,67 @@ _CMDLINE_FILE_OLD = Path("D:/llama-console/cmdline_args.txt")
 # - default: 默认值 (None = 不传该 flag)
 # - description: 作用说明
 _CMDLINE_SCHEMA: list[dict] = [
+    # --- 采样/思考组 (Unsloth Qwen3.8-27B 思考模式推荐) ---
     {"key": "temp",          "name": "温度系数",
-     "type": "float", "default": 0.6,
-     "description": "采样温度, 越高越发散 (0=确定性, 1=最大随机). 推荐 0.5-0.8."},
+     "type": "float", "default": 1.0,
+     "description": "采样温度. Unsloth Qwen3.8 思考模式=1.0 / 指令模式=0.7."},
     {"key": "top-p",         "name": "Top-P",
      "type": "float", "default": 0.95,
-     "description": "核采样概率累计阈值, 越高越多样. 与 temp 配合使用."},
+     "description": "核采样概率累计阈值. Unsloth Qwen3.8 思考=0.95 / 指令=0.80."},
     {"key": "top-k",         "name": "Top-K",
      "type": "int",   "default": 20,
-     "description": "仅从概率最高的 K 个 token 中采样. 40 常用, 越大越稳定."},
+     "description": "仅从概率最高的 K 个 token 中采样. Unsloth Qwen3.8 推荐 20."},
+    {"key": "min-p",         "name": "Min-P",
+     "type": "float", "default": 0.0,
+     "description": "最小概率阈值. Unsloth Qwen3.8 推荐 0.0."},
+    {"key": "presence-penalty", "name": "存在惩罚",
+     "type": "float", "default": 0.0,
+     "description": "抑制已出现 token. Unsloth Qwen3.8 思考=0.0 / 指令=1.5."},
     {"key": "repeat-penalty", "name": "重复惩罚",
-     "type": "float", "default": 1.1,
-     "description": "抑制重复输出, 1.0=无惩罚, 1.1 常用, 1.2 较强."},
+     "type": "float", "default": 1.0,
+     "description": "抑制重复输出. Unsloth Qwen3.8 推荐 1.0."},
+    {"key": "chat-template-kwargs", "name": "推理力度",
+     "type": "str",   "default": '{\"reasoning_effort\":\"medium\"}',
+     "description": "JSON 字符串透传给聊天模板. reasoning_effort: xhigh/medium/low/none (官方默认 xhigh)."},
     {"key": "metrics",       "name": "启用 metrics 端点",
      "type": "bool",  "default": True,
      "description": "暴露 /metrics 端点, 用于控制台采集 token 统计. 关掉后无法显示速度."},
+    # --- 硬件必需组 (2x3090 48GB 跑 262K 上下文, 删除会爆 VRAM/RAM) ---
+    {"key": "split-mode",    "name": "层切分模式",
+     "type": "str",   "default": "tensor",
+     "description": "多 GPU 层切分方式, 核弹机 2x3090 用 tensor."},
+    {"key": "flash-attn",    "name": "Flash Attention",
+     "type": "str",   "default": "on",
+     "description": "闪存注意力 on/off/auto, 开咗省速省时."},
+    {"key": "parallel",      "name": "并发 slot 数",
+     "type": "int",   "default": 1,
+     "description": "同时处理请求的 slot 数 -np, 1 最慳 VRAM."},
+    {"key": "spec-type",     "name": "投机解码",
+     "type": "str",   "default": "draft-mtp",
+     "description": "投机解码类型: draft-mtp (自带 MTP 头, Unsloth 已启用) / draft-dflash (外部 DFlash2 draft 模型, 需配 spec-draft-model)."},
+    {"key": "spec-draft-model", "name": "Draft 模型",
+     "type": "str",   "default": "",
+     "description": "投机解码外部 draft 模型文件 (-md), 相对 models/ 目录. draft-dflash 必填 (如 Qwen3.8-27B-DFlash2-Q8_0.gguf); draft-mtp 留空."},
+    {"key": "spec-draft-n-max", "name": "Draft 最大 token 数",
+     "type": "int",   "default": 7,
+     "description": "每步投机 draft token 数上限 (--spec-draft-n-max). DFlash2 硬上限 7 (block_size-1, 超出被静默钳制); MTP 推荐 3."},
+    {"key": "cache-type-k",  "name": "KV cache K 量化",
+     "type": "str",   "default": "q8_0",
+     "description": "KV cache K 量化 q8_0. 262K 上下文必须, 否则 KV 爆 VRAM."},
+    {"key": "cache-type-v",  "name": "KV cache V 量化",
+     "type": "str",   "default": "q8_0",
+     "description": "KV cache V 量化 q8_0. 262K 上下文必须, 否则 KV 爆 VRAM."},
+    {"key": "cache-ram",     "name": "KV cache RAM 上限",
+     "type": "int",   "default": 0,
+     "description": "禁止 KV cache 溢出到宿主 RAM (0=禁用)."},
+    {"key": "no-cache-idle-slots", "name": "空闲 slot 不保留 KV",
+     "type": "bool",  "default": True,
+     "description": "空闲 slot 不保留 KV cache, 省内存."},
+
+    # --- 模型命名组 ---
+    {"key": "alias",         "name": "模型别名",
+     "type": "str", "default": "qwen3.8-27b",
+     "description": "llama-server --alias, 决定 /v1/models 返回的 model id (默认 qwen3.8-27b)."},
 ]
 
 
@@ -1113,7 +1164,7 @@ def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
         available=False, stale=False, stale_ts=None,
     )
     try:
-        with httpx.Client(timeout=0.4) as c:
+        with httpx.Client(timeout=0.4, trust_env=False) as c:
             r = c.get(f"http://127.0.0.1:{port}/metrics")
             if r.status_code != 200:
                 return ns
