@@ -452,12 +452,18 @@ class SettingsPage(QWidget):
         self._cmdline_edit.setPlainText(self._render_json_with_comments(data))
 
     def _render_json_with_comments(self, data: dict) -> str:
-        """把 dict 渲染为「带中文注释的 JSON」, 每项 name/description."""
+        """把 dict 渲染为「带中文注释的 JSON」, 每项 name/description.
+
+        Quinn 21:50 修复 (Worker): 逗号放在注释前 (格式: `  "key": value,  // 注释`),
+        末尾行无逗号。避免 parse 时 `//` 注释把逗号一起剥掉导致 JSON 缺逗号报错。
+        """
         schema = backend_llama.get_cmdline_schema()
         meta = {item["key"]: item for item in schema}
         lines: list[str] = ["{"]
-        items: list[str] = []
-        for key, val in data.items():
+        # 一次生成所有 item 行: 每一行自带末尾逗号 (末尾除外), 注释放在逗号后面
+        n = len(data)
+        for idx, (key, val) in enumerate(data.items()):
+            is_last = idx == n - 1
             comment_parts: list[str] = []
             if key in meta:
                 m = meta[key]
@@ -474,21 +480,40 @@ class SettingsPage(QWidget):
             else:
                 # str 加双引号 + 转义
                 val_str = json.dumps(str(val), ensure_ascii=False)
-            line = f'  {json.dumps(key, ensure_ascii=False)}: {val_str}'
+            # 逗号在前, 注释在后 (避免 parse 时被剥)
+            comma = "" if is_last else ","
+            line = f'  {json.dumps(key, ensure_ascii=False)}: {val_str}{comma}'
             if comment_parts:
                 line += f"  // {comment_parts[0]}"
                 if len(comment_parts) > 1:
                     line += f" — {comment_parts[1]}"
-            items.append(line)
-        lines.append(",\n".join(items))
-        lines.append("\n}")
+            lines.append(line)
+        lines.append("}")
         return "\n".join(lines)
 
     def _parse_json_with_comments(self, text: str) -> dict:
         """从「带注释的 JSON 文本」解析 dict, 跳过 // 行尾注释 + 顶部说明行.
 
-        兼容: 单引号 (转双引号) + 末尾多余逗号 (JSON5 风格).
+        兼容: 单引号 (转双引号) + 末尾多余逗号 (JSON5 风格) + 全角标点归一化.
+
+        Quinn 21:50 增强 (Worker): 用户中文输入法打出来的「:」,「,」,「{」,「}」,「[」,「]」,
+        引号等是全角, 这里全部转半角后再 parse, 避免用户手编报错。
         """
+        # 1. 全角标点归一化 (中文输入法常输出全角, JSON 只认半角)
+        text = (
+            text.replace("：", ":")   # 全角冒号
+                .replace("，", ",")   # 全角逗号
+                .replace("（", "(")   # 全角左括号
+                .replace("）", ")")   # 全角右括号
+                .replace("｛", "{")   # 全角左花括号
+                .replace("｝", "}")   # 全角右花括号
+                .replace("［", "[")   # 全角左中括号
+                .replace("］", "]")   # 全角右中括号
+                .replace("“", '"')   # 全角左双引号
+                .replace("”", '"')   # 全角右双引号
+                .replace("‘", "'")   # 全角左单引号
+                .replace("’", "'")   # 全角右单引号
+        )
         cleaned: list[str] = []
         for line in text.splitlines():
             # 去除 // 后注释 (但保留字符串内的 //)
