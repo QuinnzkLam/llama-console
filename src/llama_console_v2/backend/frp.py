@@ -22,7 +22,7 @@ FRP_CONFIG_PATH = Path("D:/frp/frpc.toml")
 FRP_CWD = Path("D:/frp")
 
 # Windows subprocess creationflags — DETACHED_PROCESS 脱离父进程控制
-# (nlama.exe 关咗都唔会拉 frpc 陪葬), CREATE_NO_WINDOW 唔弹黑窗.
+# (NLM.exe 关咗都唔会拉 frpc 陪葬), CREATE_NO_WINDOW 唔弹黑窗.
 # Non-Windows 落空 (start_frpc 会照样 spawn, 但 macOS/Linux 无 frpc 业务场景).
 if sys.platform == "win32":
     _FRP_CREATIONFLAGS = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(

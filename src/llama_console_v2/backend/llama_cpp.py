@@ -231,6 +231,7 @@ def get_current_version() -> str:
         result = subprocess.run(
             [str(exe), "--version"],
             capture_output=True, text=True, timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         out = (result.stdout + result.stderr).strip()
         m = re.search(r"version[:\s]+(\S+)", out, re.IGNORECASE)
@@ -716,7 +717,7 @@ def _elevated_kill_llama() -> bool:
 
     2026-09-01 (Franky): 根因 — schtask \\Hedanji-Llama-Start 用
     RunLevel=HighestAvailable 起 llama-server, 该实例为 admin integrity
-    (High). GUI (nlama.exe) 以普通用户 (Medium) 运行, taskkill /F 对 High
+    (High). GUI (NLM.exe) 以普通用户 (Medium) 运行, taskkill /F 对 High
     进程返回 Access Denied → 「无法暂停」. 这里用 Start-Process -Verb RunAs
     触发一次 UAC 提升, 由 taskkill 以管理员身份结束残留的 elevated llama.
 
@@ -731,7 +732,10 @@ def _elevated_kill_llama() -> bool:
             '-ArgumentList \'/F\',\'/IM\',\'llama-server.exe\',\'/T\' '
             '-Verb RunAs -WindowStyle Hidden"'
         )
-        subprocess.run(ps, shell=True, timeout=25, capture_output=True, text=True)
+        # creationflags=CREATE_NO_WINDOW: 避免 shell=True 借 cmd.exe 宿主弹黑窗。
+        # -Verb RunAs 本身由 powershell 触发 UAC, 不会另开可见 console。
+        subprocess.run(ps, shell=True, timeout=25, capture_output=True, text=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
         # Start-Process -Verb RunAs 本身返回即代表用户已接受 UAC
         return True
     except Exception:
@@ -759,6 +763,7 @@ def stop() -> dict:
                 result = subprocess.run(
                     ["taskkill", "/F", "/IM", name],
                     capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
                 # taskkill returncode 0 = 杀到, 128 = 搵唔到 (仍算 OK)
                 if result.returncode == 0:
@@ -771,6 +776,7 @@ def stop() -> dict:
                         result = subprocess.run(
                             ["taskkill", "/F", "/IM", pname],
                             capture_output=True, text=True, timeout=10,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
                         )
                         if result.returncode == 0:
                             killed.append(pname)

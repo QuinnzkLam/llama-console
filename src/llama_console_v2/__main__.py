@@ -1,4 +1,4 @@
-"""nlama.exe entry point.
+"""NLM.exe entry point.
 
 This module is the PyInstaller bootloader target. Imports must be absolute
 (package-level) so they resolve under both:

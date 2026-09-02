@@ -5,9 +5,9 @@ REM   file verified structurally complete: 81/81 tensors, data fits. MTP = verif
 REM [UPDATED 2026-09-01d] +--fit off: v0.3.0 fit_params 默认 on, 对 --split-mode tensor
 REM   会 abort ("llama_params_fit is not implemented for SPLIT_MODE_TENSOR"). 实测必须
 REM   --fit off 才能用 tensor 启动。生产实例即以此方式运行。/health 200。
-REM [UPDATED 2026-08-29] v0.1.2-dev -> v0.3.0 (nlama GUI same-source binary + same args)
+REM [UPDATED 2026-08-29] v0.1.2-dev -> v0.3.0 (NLM GUI same-source binary + same args)
 REM v0.3.0 binary: D:\llama-console\llama.cpp\build\bin\llama-server.exe (built 08-28)
-REM Args = nlama GUI cmdline_args.json (Unsloth Qwen3.8-27B thinking-mode recommended)
+REM Args = NLM GUI cmdline_args.json (Unsloth Qwen3.8-27B thinking-mode recommended)
 REM [UPDATED 2026-09-01 搬迁] 启动器统一搬到 D:\llama-console 下, log 落
 REM   D:\llama-console\logs\llama_win.log, 不再引用旧 services 目录。
 cd /d D:\llama-console
