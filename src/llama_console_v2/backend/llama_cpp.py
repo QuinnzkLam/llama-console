@@ -396,10 +396,65 @@ def _display_model_name(name: str) -> str:
     return n
 
 
+def _get_model_info_from_props(port: int = DEFAULT_PORT) -> tuple[str | None, str | None, int | None]:
+    """Fallback: read model info from /props HTTP API (0.4s short timeout).
+
+    Franky 2026-09-02 (Bug 1/2 修复): 当 llama-server 由 Windows 定时任务
+    (schtasks, RunLevel=HighestAvailable) 启动时, 该实例为 admin integrity (High),
+    NLM.exe 以普通用户 (Medium) 运行读唔到进程 cmdline → cmdline 解析失败
+    → model/ctx 显示 "-"。但 /props、/health、/metrics 全部 HTTP 200 可达。
+
+    这里 fallback 到 /props 攞 model_path / model_ftype / n_ctx / model_alias,
+    与 _probe_health 同策略: trust_env=False (bypass 系统代理) + 0.4s 短超时。
+    """
+    try:
+        with httpx.Client(timeout=0.4, trust_env=False) as c:
+            r = c.get(f"http://127.0.0.1:{port}/props")
+            if r.status_code != 200:
+                return None, None, None
+            data = r.json()
+    except Exception:
+        return None, None, None
+    if not isinstance(data, dict):
+        return None, None, None
+    display_name = None
+    quant = None
+    ctx = None
+    raw_model = data.get("model_path")
+    if raw_model:
+        raw_model = Path(str(raw_model)).name
+        display_name = _display_model_name(raw_model)
+        if "-" in raw_model:
+            stem = raw_model[:-5] if raw_model.lower().endswith(".gguf") else raw_model
+            m = _QUANT_RE.search(stem)
+            if m:
+                quant = m.group(1).lstrip("-").lstrip(".")
+    try:
+        ctx = int(data.get("n_ctx"))
+    except (TypeError, ValueError):
+        ctx = None
+    if ctx is None:
+        # /props 的 n_ctx 可能嵌套喺 default_generation_settings 里
+        dgs = data.get("default_generation_settings")
+        if isinstance(dgs, dict):
+            try:
+                ctx = int(dgs.get("n_ctx"))
+            except (TypeError, ValueError):
+                ctx = None
+    # model_path 解析唔到 / 唔存在 → 用 alias 兜底 (如 "qwen3.8-27b")
+    if not display_name and data.get("model_alias"):
+        display_name = str(data["model_alias"])
+    return display_name, quant, ctx
+
+
 def _get_model_info() -> tuple[str | None, str | None, int | None]:
     """Return (display_name, quant, ctx_size) by reading process cmdline.
 
     Quinn 16:11: display_name 已剥掉 .gguf + 尾部 quant, 形如 "Qwen3.8-27B".
+
+    Franky 2026-09-02 (Bug 1/2): cmdline 读唔到 (AccessDenied, 定时任务 elevated
+    启动) 或 cmdline 扒唔到 model/ctx → fallback 到 /props HTTP API, 确保状态卡
+    喺两种启动路径下显示一致 (model name + ctx)。
     """
     proc = _find_process()
     if proc is None:
@@ -407,7 +462,8 @@ def _get_model_info() -> tuple[str | None, str | None, int | None]:
     try:
         cmdline = proc.cmdline()
     except (psutil.AccessDenied, psutil.NoSuchProcess):
-        return None, None, None
+        # 定时任务 (elevated) 启动 → 普通用户读唔到 cmdline → /props fallback
+        return _get_model_info_from_props()
     raw_model = None
     quant = None
     ctx = None
@@ -420,6 +476,9 @@ def _get_model_info() -> tuple[str | None, str | None, int | None]:
                 ctx = int(cmdline[i + 1])
             except ValueError:
                 pass
+    # cmdline 可读但扒唔到 model/ctx (e.g. 特殊启动方式) → 防御性 fallback
+    if raw_model is None and ctx is None:
+        return _get_model_info_from_props()
     display_name = _display_model_name(raw_model) if raw_model else None
     if raw_model and "-" in raw_model:
         # Detect quant from filename like "Qwen3.8-27B-Q8_0.gguf"
@@ -1330,16 +1389,39 @@ def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
       - available=True  : stale=False, stale_ts=None
       - available=False : 若盘上有 state → 带旧数字 + stale=True + stale_ts=ISO 串
                           若盘上无 state → 全 None + stale=False, stale_ts=None
+
+    Franky 2026-09-02 (Bug 1): 连接判定改为纯 HTTP (/metrics + /health 兜底),
+    唔依赖「有冇成功读到进程 cmdline」。定时任务 (elevated) 启动嘅 llama-server,
+    NLM 读唔到 cmdline, 但 /metrics /health 都 HTTP 200。
+    - /metrics 200 → 正常采集, available=True
+    - /metrics 抛异常/非 200 → 探 /health:
+        * /health ok → 服务确实连着, 只是 /metrics 暂不可达 → available=True
+          (唔会误报「服务未连接」)
+        * /health 唔 ok → 服务真 down → 读上次快照标 stale
     """
     ns = SimpleNamespace(
         prompt_tokens=None, predicted_tokens=None,
         prompt_tps=None, predicted_tps=None,
         available=False, stale=False, stale_ts=None,
     )
+
+    def _health_ok() -> bool:
+        try:
+            with httpx.Client(timeout=0.4, trust_env=False) as c:
+                hr = c.get(f"http://127.0.0.1:{port}/health")
+                if hr.status_code == 200 and hr.json().get("status") == "ok":
+                    return True
+        except Exception:
+            pass
+        return False
+
     try:
         with httpx.Client(timeout=0.4, trust_env=False) as c:
             r = c.get(f"http://127.0.0.1:{port}/metrics")
             if r.status_code != 200:
+                # /metrics 不可用但服务可能仍连着 → 用 /health 判定
+                if _health_ok():
+                    ns.available = True
                 return ns
             metrics = _parse_metrics(r.text)
             ns.prompt_tokens = int(
@@ -1360,7 +1442,14 @@ def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
             # Quinn 16:11: 写盘以便后续关闭后能继续显示
             _save_token_state(ns)
     except Exception:
-        # 连接失败 / 服务器未启 /metrics — 尝试读上次的快照
+        # 连接失败 / 服务器未启 /metrics — 先探 /health 区分「服务连着」vs「真 down」
+        if _health_ok():
+            # 服务连着, 只是 /metrics 请求异常 → 视为已连接 (唔误报「服务未连接」)
+            ns.available = True
+            ns.stale = False
+            ns.stale_ts = None
+            return ns
+        # 服务真 down → 尝试读上次的快照
         saved = _load_token_state()
         if saved:
             ns.prompt_tokens = saved.get("prompt_tokens")
