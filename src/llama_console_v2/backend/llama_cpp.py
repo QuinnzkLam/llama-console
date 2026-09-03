@@ -570,7 +570,14 @@ def _llama_bg_worker() -> None:
 
 
 def _find_llama_status_minimal() -> SimpleNamespace:
-    """最便宜的 fallback — 不做 httpx, 主线程同步 fallback 用."""
+    """冷启动期 fallback — BG 线程尚未产出缓存时用.
+
+    Franky 2026-09-02 (Bug 2 修复): 之前硬编码 state="loading" 即使 llama-server
+    已就绪. 主线程首次 refresh() 落入此 fallback 时, 永远显示「加载中」直到
+    BG 线程第一次完成 (~1-2s 后). 改为: proc 存在时调 _probe_health(port)
+    (0.4s 短超时 + trust_env=False) 拿真实 state. server 真 down 时回退
+    到 "loading". 此函数仅在主线程冷启动早期被调一次, 后续都走 BG 缓存.
+    """
     proc = _find_process()
     port = DEFAULT_PORT
     if proc is None:
@@ -586,7 +593,7 @@ def _find_llama_status_minimal() -> SimpleNamespace:
         uptime_sec = 0
     model, quant, ctx = _get_model_info()
     return SimpleNamespace(
-        state="loading",  # 无 /health 验证, 标 loading 表示未知
+        state=_probe_health(port),  # Franky 2026-09-02 Bug 2: 探 /health 拿真实 state
         model_name=model, quant=quant, ctx_size=ctx,
         port=port, pid=proc.pid, uptime=_format_uptime(uptime_sec),
         bind=f"{DEFAULT_HOST}:{port}",

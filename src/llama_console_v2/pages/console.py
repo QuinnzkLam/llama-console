@@ -952,7 +952,7 @@ class ConsolePage(QWidget):
                 stale_ts = getattr(snap, "stale_ts", "") or ""
                 hh_mm_ss = stale_ts.split("T", 1)[1][:8] if "T" in stale_ts else stale_ts
                 self._token_total_lbl.setText(
-                    f"最后统计 {hh_mm_ss} · 服务未连接"
+                    f"最后统计 {hh_mm_ss}"
                 )
             else:
                 # /metrics 不可用 且无历史快照 (首次启动 / 未服务过)
