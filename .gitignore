@@ -50,3 +50,7 @@ llama.cpp/
 token_stats_state.json
 FRP/frpc.exe
 FRP/*.log
+
+# FRP local-only (Quinn: do not upload to GitHub, 2026-09-03)
+FRP/
+crontab/
