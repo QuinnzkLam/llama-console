@@ -45,6 +45,10 @@ Thumbs.db
 
 # Large vendored / runtime (local only, 2026-09-01)
 models/
+# 2026-11-20 Quinn 需求: config/models/ 下的模型 profile 是配置模板, 需入库
+# (上面 models/ 会误伤此目录, 这里例外放行)
+!config/models/
+!config/models/*.json
 llama.cpp/
 *.bak_*
 token_stats_state.json

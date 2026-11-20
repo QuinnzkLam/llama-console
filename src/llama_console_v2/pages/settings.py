@@ -148,6 +148,10 @@ class SettingsPage(QWidget):
         # Quinn 09:00 三轮: 删除 PageFooter("设置") —— 用户图片中"启动参数卡下方"的
         # "设置"独立一行就是它. 直接移除, 改为空 spacer.
 
+        # 2026-11-20 Quinn 需求: 模型下拉切换 → 加载对应参数 profile
+        # (连在 _load_models 之前; 后者填充时会 blockSignals, 不会触发初始化切换)
+        self._model_combo.currentIndexChanged.connect(self._on_model_changed)
+
         # 初始加载
         self._load_models()
         self._load_cmdline()
@@ -415,24 +419,39 @@ class SettingsPage(QWidget):
     # Data loaders
     # ========================================================================
     def _load_models(self) -> None:
+        """填充模型下拉 + 定位当前 active model.
+
+        2026-11-20 Quinn 需求: clear/addItem/setCurrentIndex 全程 blockSignals 包住
+        (try/finally 还原), 避免初始化填充触发 _on_model_changed 误改配置; 填充后用
+        get_active_model_filename() 找对应 index 设为当前项.
+        """
         try:
             models = backend_llama.list_models()
-            self._model_combo.clear()
-            for m in models:
-                self._model_combo.addItem(m)
-            if models:
-                self._model_combo.setCurrentIndex(0)
-                path = backend_llama.current_model_path()
-                # 缩短路径: 只显最后一段目录 + 文件名
-                if path:
-                    from pathlib import Path
-                    p = Path(path)
-                    short = f"{'..' if len(str(p.parent)) > 40 else str(p.parent)}/{p.name}"
-                    self._model_path_lbl.setText(short)
-                else:
-                    self._model_path_lbl.setText("-")
+            self._model_combo.blockSignals(True)
+            try:
+                self._model_combo.clear()
+                for m in models:
+                    self._model_combo.addItem(m)
+                # 2026-11-20 Quinn 需求: 用 active model 定位下拉当前项
+                active = backend_llama.get_active_model_filename()
+                idx = self._model_combo.findText(active) if active else -1
+                self._model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            finally:
+                self._model_combo.blockSignals(False)
+            self._update_model_path_lbl()
         except Exception as e:  # noqa: BLE001
             self._model_path_lbl.setText(f"加载模型失败: {e}")
+
+    def _update_model_path_lbl(self) -> None:
+        """刷新模型路径标签 (缩短为最后一段目录 + 文件名)."""
+        path = backend_llama.current_model_path()
+        if not path:
+            self._model_path_lbl.setText("-")
+            return
+        from pathlib import Path
+        p = Path(path)
+        short = f"{'..' if len(str(p.parent)) > 40 else str(p.parent)}/{p.name}"
+        self._model_path_lbl.setText(short)
 
     def _load_cmdline(self) -> None:
         """加载 JSON 配置 + 渲染为「带中文注释的 JSON 编辑文本」.
@@ -584,6 +603,26 @@ class SettingsPage(QWidget):
     # ========================================================================
     # Actions
     # ========================================================================
+    def _on_model_changed(self, index: int) -> None:
+        """2026-11-20 Quinn 需求: 下拉切模型 → 切换启动配置 profile.
+
+        - 调 backend select_model_profile() 载入对应模型 profile 并写回主 JSON;
+        - 用返回 dict 刷新 JSON 编辑器 (覆盖未保存内容, 不加确认框);
+        - 更新模型路径标签.
+        """
+        model = self._model_combo.currentText()
+        if not model:
+            return
+        try:
+            data = backend_llama.select_model_profile(model)
+        except Exception as e:  # noqa: BLE001
+            self._set_params_status(f"✗ 切换模型失败: {e}", danger=True)
+            return
+        # select_model_profile 返回 dict 的同时已 save 主 JSON, 直接拿来刷新编辑器
+        self._cmdline_edit.setPlainText(self._render_json_with_comments(data))
+        self._update_model_path_lbl()
+        self._set_params_status(f"✓ 已切换到 {model} 并加载对应参数", success=True)
+
     def _on_save(self) -> None:
         """解析带注释 JSON → 校验 → 写 JSON 配置文件.
 

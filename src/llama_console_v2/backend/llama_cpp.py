@@ -1226,6 +1226,69 @@ def validate_cmdline_args_dict(data: dict) -> tuple[bool, str]:
 
 
 # ----------------------------------------------------------------
+# 2026-11-20 Quinn 需求: GUI 模型选择绑定 —— active model / profile 切换
+# ----------------------------------------------------------------
+def get_active_model_filename() -> str | None:
+    """读取当前生效主 JSON (_CMDLINE_FILE) 的 "model" 文件名.
+
+    2026-11-20 Quinn 需求: 供 settings 下拉定位当前项 + current_model_path 解析路径.
+    文件不存在 / JSON 损坏 / 无 model 字段 → None.
+    """
+    if not _CMDLINE_FILE.is_file():
+        return None
+    try:
+        data = json.loads(_CMDLINE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    model = data.get("model")
+    if model is None or model == "":
+        return None
+    return str(model)
+
+
+def select_model_profile(model_filename: str) -> dict:
+    """切换模型: 加载 config/models/<stem>.json profile 覆盖主 JSON 配置.
+
+    2026-11-20 Quinn 需求, 三分支:
+      1) profile 存在且 validate_cmdline_args_dict 通过 → 用 profile 全部参数写回主 JSON
+      2) profile 存在但校验失败 → 保留主 JSON 现有参数, 仅更新 model 字段 (安全回退)
+      3) profile 不存在 → 主 JSON 仅更新 model 字段
+    返回最终 dict (调用时已写回主 JSON, GUI 端据此刷新编辑器).
+    """
+    stem = Path(model_filename).stem
+    profile = _CMDLINE_FILE.parent / "models" / (stem + ".json")
+    base = load_cmdline_args_dict()  # 主 JSON 现状 (已剥前缀 + 类型 coerce)
+
+    final: dict
+    if profile.is_file():
+        try:
+            profile_data = json.loads(profile.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            profile_data = None
+        if isinstance(profile_data, dict):
+            ok, _err = validate_cmdline_args_dict(profile_data)
+            if ok:
+                # 分支 1: profile 合法 → 全部参数覆盖
+                final = _coerce_dict(profile_data)
+            else:
+                # 分支 2: profile 校验失败 → 保留主 JSON 参数, 仅换 model
+                final = dict(base)
+        else:
+            # profile 读不进来 → 等同不存在 (分支 3)
+            final = dict(base)
+    else:
+        # 分支 3: 无 profile → 仅换 model
+        final = dict(base)
+
+    # 无论哪一支, 生效 model 必须与下拉选择一致
+    final["model"] = model_filename
+    save_cmdline_args_dict(final)
+    return final
+
+
+# ----------------------------------------------------------------
 # 向后兼容: 旧 list[str] API 仍可用, 但底层走 JSON 配置
 # ----------------------------------------------------------------
 def list_models() -> list[str]:
@@ -1241,11 +1304,22 @@ def list_models() -> list[str]:
 
 
 def current_model_path() -> str | None:
-    """Return full path of currently selected main model (or None)."""
+    """Return full path of currently active main model (or None).
+
+    2026-11-20 Quinn 需求: 优先读 _CMDLINE_FILE 的 model 字段解析 active model
+    (_MODELS_DIR / filename); 找不到才 fallback 旧逻辑 (list_models()[0]).
+    """
+    active = get_active_model_filename()
+    if active:
+        candidate = Path(active)
+        if not candidate.is_absolute():
+            candidate = _MODELS_DIR / active
+        if candidate.is_file():
+            return str(candidate)
+    # fallback: 第一个 main model (与旧 _load_models 行为一致)
     models = list_models()
     if not models:
         return None
-    # Default = first one (matches _load_models)
     return str(_MODELS_DIR / models[0])
 
 
