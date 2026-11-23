@@ -121,7 +121,9 @@ def _worker() -> None:
     while True:
         try:
             if _init_computer():
-                _COMPUTER.Update()
+                # pythonnet binding: Computer 冇 Update(), Update 喺每個 Hardware 上
+                for hw in _COMPUTER.Hardware:
+                    hw.Update()
                 with _LOCK:
                     _CACHE["snap"] = _collect()
                     _CACHE["ts"] = time.monotonic()
