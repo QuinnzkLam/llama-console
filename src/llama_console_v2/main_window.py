@@ -153,6 +153,8 @@ class MainWindow(QMainWindow):
         # 原因: offscreen 下窗口尺寸=client 高度, 但 Windows 真机的标题栏/边框会额外
         # 占用 client 高度 (~30-40px), 导致同尺寸下真机内容比模拟多一截而触发滚动条.
         # 乘 0.93 让内容整体缩小约 7%, 抵消该占用并留出垂直余量, 真机不再出现滚动条.
+        # 记住展开 scale 的基线, set_compact(False) 用同一算法还原
+        self._expanded_scale_base = (win_w, win_h)
         t.set_font_scale(t.compute_font_scale(win_w, win_h) * 0.93)
         self.resize(win_w, win_h)
         self.setStyleSheet(f"background-color: {t.color('bg')};")
@@ -544,6 +546,9 @@ class MainWindow(QMainWindow):
         self._compact = compact
         self._settings.setValue("compact_mode", compact)
         if compact:
+            # compact 用固定 0.80 缩放, 免得大屏展开的 scale 挤爆 980×300 布局
+            t.set_font_scale(t.COMPACT["font_scale"])
+            t.rescale_all_geometries()
             self._compact_frame.set_border_color(self._player_page.border_color())
             self._body_layout.removeWidget(self._stack)
             self._frame_layout.addWidget(self._stack, 1)
@@ -565,6 +570,9 @@ class MainWindow(QMainWindow):
             self.setStyleSheet(f"background-color: {t.color('bg')};")
             self.setMinimumSize(QSize(0, 0))
             self.setMaximumSize(QSize(16_777_215, 16_777_215))
+            ew, eh = self._expanded_scale_base
+            t.set_font_scale(t.compute_font_scale(ew, eh) * 0.93)  # 同 __init__ 算法还原
+            t.rescale_all_geometries()
             w, h = t.recommended_window_size()
             self.resize(w, h)
             self.setFixedSize(w, h)  # R12: 展开模式同样禁用拖拽调节

@@ -1,40 +1,49 @@
 """RingGauge - QPainter 环形仪表 (LlamaDeck v3 硬件环).
 
-底环深灰 + 数值弧紫→青渐变 (270°) + 中央两行文字 (值 / 标签).
+底环深灰 + 数值弧紫→青渐变 (270°); 环内只有百分比大字居中,
+标签/单位在环下方外侧一行 (mockup 两段式).
 setValue() 只更新数值并触发重绘; 采样数据由调用方从 hardware.snapshot() 传入.
 """
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from llama_console_v2 import theme as t
 
 
 class RingGauge(QWidget):
-    """单个硬件环; 值文字可为百分比或 used/total (如 "21.6/64")."""
+    """环内显示百分比大字, 环下显示 sub_text (默认 label)."""
 
-    def __init__(self, label: str, parent: QWidget | None = None) -> None:
+    def __init__(self, label: str, sub_text: str | None = None,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._label = label
+        self._sub_text = sub_text or label
         self._percent = 0.0
         self._value_text = "0"
         self.setObjectName("RingGauge")
         self.setStyleSheet("background: transparent; border: none;")
-        t.fixed_w(self, t.COMPACT["gauge_diameter"])
-        t.fixed_h(self, t.COMPACT["gauge_diameter"])
+        # 水平可拉伸 (由 layout stretch 均分), 高度固定 = 直径 + 下方文字行
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(t.scaled(t.COMPACT["gauge_diameter"]))
+        t.fixed_h(self, t.COMPACT["gauge_diameter"] + 24)
 
-    def setValue(self, percent: float, text: str) -> None:
-        """更新百分比 (0-100) 与中央值文字, 触发重绘."""
+    def setValue(self, percent: float, text: str, sub_text: str | None = None) -> None:
+        """更新百分比与中央值文字; sub_text 传入时覆盖环下标签."""
         self._percent = max(0.0, min(100.0, float(percent)))
         self._value_text = text
+        if sub_text is not None:
+            self._sub_text = sub_text
         self.update()
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        size = min(self.width(), self.height())
+        diameter = t.scaled(t.COMPACT["gauge_diameter"])
+        x0 = (self.width() - diameter) / 2
         margin = max(2, t.scaled(3))
-        arc = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
+        arc = QRectF(x0 + margin, margin,
+                     diameter - 2 * margin, diameter - 2 * margin)
         width = t.scaled(6, floor=4)
         start, span = 135 * 16, t.RING["span_deg"] * 16
 
@@ -55,21 +64,22 @@ class RingGauge(QWidget):
             p.setPen(value_pen)
             p.drawArc(arc, start, int(span * self._percent / 100.0))
 
-        # 中央两行: 值 (大) + 标签 (小)
+        # 环内: 百分比大字居中
         value_font = QFont()
         value_font.setPointSize(t.FONT_SIZE["xs"])
         value_font.setBold(True)
-        if len(self._value_text) > 4:
-            value_font.setPointSize(max(7, t.FONT_SIZE["xs"] - 2))
         p.setFont(value_font)
         p.setPen(QColor(t.color("text_primary")))
-        p.drawText(arc.adjusted(0, -arc.height() * 0.10, 0, -arc.height() * 0.10),
-                   Qt.AlignmentFlag.AlignCenter, self._value_text)
+        p.drawText(arc, Qt.AlignmentFlag.AlignCenter, self._value_text)
 
-        label_font = QFont()
-        label_font.setPointSize(t.FONT_SIZE["xs"])
-        p.setFont(label_font)
+        # 环下: 标签 / 单位 (小字, 允许 "21.6/64 GB" 这类较长文本)
+        sub_font = QFont()
+        sub_font.setPointSize(t.FONT_SIZE["xs"])
+        if len(self._sub_text) > 6:
+            sub_font.setPointSize(max(7, t.FONT_SIZE["xs"] - 2))
+        p.setFont(sub_font)
         p.setPen(QColor(t.color("text_muted")))
-        p.drawText(arc.adjusted(0, arc.height() * 0.20, 0, arc.height() * 0.20),
-                   Qt.AlignmentFlag.AlignCenter, self._label)
+        sub_top = diameter + t.scaled(2, floor=1)
+        p.drawText(QRectF(0, sub_top, self.width(), self.height() - sub_top),
+                   Qt.AlignmentFlag.AlignCenter, self._sub_text)
         p.end()

@@ -289,6 +289,17 @@ class PlayerPage(QWidget):
         combo_col.setSpacing(0)
         self._combo = QComboBox()
         self._combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        t.fixed_h(self._combo, 36)
+        self._combo.setStyleSheet(
+            f"QComboBox {{ background-color: {t.color('input')}; color: {t.color('text_primary')}; "
+            f"border: 1px solid {t.color('border')}; border-radius: {t.radius('md')}px; "
+            f"padding-left: {t.scaled(8)}px; }} "
+            f"QComboBox::drop-down {{ width: {t.scaled(24)}px; border: none; }} "
+            f"QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; "
+            f"border-left: {t.scaled(5, floor=3)}px solid transparent; "
+            f"border-right: {t.scaled(5, floor=3)}px solid transparent; "
+            f"border-top: {t.scaled(6, floor=4)}px solid {t.color('text_secondary')}; }}"
+        )
         self._combo.blockSignals(True)
         self._combo.addItems(backend_llama.list_models())
         active = backend_llama.get_active_model_filename()
@@ -374,7 +385,7 @@ class PlayerPage(QWidget):
         for label in ("CPU", "内存", "GPU0·核心", "GPU0·显存", "GPU1·核心", "GPU1·显存"):
             gauge = RingGauge(label)
             self._gauges.append(gauge)
-            lay.addWidget(gauge)
+            lay.addWidget(gauge, 1)  # 等效 stretch 均分, 窗口变窄时无挤压
         self._no_gpu = QLabel("未检测到 GPU")
         self._no_gpu.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
         self._no_gpu.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -477,21 +488,25 @@ class PlayerPage(QWidget):
     def _apply_gauges(self, cpu, ram, gpus) -> None:
         """6 gauge → snapshot 字段映射见交付报告; 不足 2 GPU 的对应隐藏."""
         cpu_pct = float(getattr(cpu, "util_percent", 0) or 0) if cpu else 0.0
-        self._gauges[0].setValue(cpu_pct, f"{cpu_pct:.0f}%")
+        self._gauges[0].setValue(cpu_pct, f"{cpu_pct:.0f}%", "CPU")
 
         used = float(getattr(ram, "used_gb", 0) or 0) if ram else 0.0
         cap = float(getattr(ram, "capacity_gb", 0) or 0) if ram else 0.0
-        self._gauges[1].setValue(used / cap * 100 if cap else 0, f"{used:.1f}/{cap:.0f}")
+        self._gauges[1].setValue(
+            used / cap * 100 if cap else 0, f"{round(used / cap * 100) if cap else 0}%",
+            f"{used:.1f}/{cap:.0f} GB",
+        )
 
         for i in range(2):
             gpu = gpus[i] if i < len(gpus) else None
             util = float(getattr(gpu, "util_percent", 0) or 0) if gpu else 0.0
-            self._gauges[2 + i * 2].setValue(util, f"{util:.0f}%")
+            self._gauges[2 + i * 2].setValue(util, f"{util:.0f}%", f"GPU{i}·核心")
             v_used = getattr(gpu, "vram_used_mb", 0) or 0
             v_total = getattr(gpu, "vram_total_mb", 0) or 0
             vram_pct = v_used / v_total * 100 if v_total else 0
             self._gauges[3 + i * 2].setValue(
-                vram_pct, f"{v_used / 1024:.1f}/{v_total / 1024:.0f}"
+                vram_pct, f"{vram_pct:.0f}%",
+                f"{v_used / 1024:.1f}/{v_total / 1024:.0f} GB",
             )
         for i, gauge in enumerate(self._gauges[2:]):
             gauge.setVisible(i < len(gpus))

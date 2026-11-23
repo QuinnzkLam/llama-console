@@ -310,7 +310,8 @@ def status_color(state: str) -> str:
 # ============================================================
 COMPACT = {
     "width":         980,
-    "height":        280,
+    "height":        300,
+    "font_scale":    0.80,   # compact 固定字号缩放, 避免大屏展开 scale 挤爆紧凑布局
     "radius":        14,
     "border_width":  2,
     "frame_margin":  14,   # 圆角卡离窗口边的透明留白 (给阴影用)
