@@ -59,6 +59,7 @@ def _init_computer() -> bool:
     _GPU_GROUPS = []
     for hw in getattr(computer, "Hardware", []) or []:
         htype = str(getattr(hw, "HardwareType", "")).split(".")[-1].lower()
+        # DEBUG
         if "gpu" not in htype:
             continue
         sensors: list = []
@@ -104,13 +105,13 @@ def _collect() -> SimpleNamespace:
 
     snap = SimpleNamespace(
         cpu_temp=_find(all_sensors, ("cpu package",), "temperature"),
-        cpu_power=_find(all_sensors, ("cpu package power",), "power"),
+        cpu_power=_find(all_sensors, ("cpu package",), "power"),
         cpu_freq_lhm=_find(all_sensors, ("core max", "clock"), "clock"),
         gpu0_hotspot=gpu(0, ("hot spot", "hotspot"), "temperature"),
-        gpu0_power=gpu(0, ("package power", "gpu power"), "power"),
+        gpu0_power=gpu(0, ("gpu package",), "power"),
         gpu0_vram_temp=gpu(0, ("memory junction", "memory temp"), "temperature"),
         gpu1_hotspot=gpu(1, ("hot spot", "hotspot"), "temperature"),
-        gpu1_power=gpu(1, ("package power", "gpu power"), "power"),
+        gpu1_power=gpu(1, ("gpu package",), "power"),
         gpu1_vram_temp=gpu(1, ("memory junction", "memory temp"), "temperature"),
     )
     powers = [snap.cpu_power, snap.gpu0_power, snap.gpu1_power]
