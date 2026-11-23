@@ -518,8 +518,8 @@ class PlayerPage(QWidget):
     def _toggle(self) -> None:
         """Space / 播放键: 与 sidebar 共用同一状态源, 不自己调 backend."""
         focus = QApplication.focusWidget()
-        # combobox 要留给下拉框, 按钮要留给自身 Space 激活, 避免双触发
-        if not self.isVisible() or isinstance(focus, (QComboBox, QPushButton)):
+        # combobox 要留给下拉框; 按钮 focus 时也允许触发 (optimistic flag 已防重)
+        if not self.isVisible() or isinstance(focus, QComboBox):
             return
         if self._runningish:
             self._start_ts = None
