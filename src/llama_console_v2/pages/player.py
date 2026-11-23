@@ -178,6 +178,32 @@ class _PulseBars(QWidget):
         p.end()
 
 
+class _SubtitleCombo(QComboBox):
+    """两行下拉: 主名由 QComboBox 自绘在上半, 副标题自绘在下半."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._sub_text = ""
+
+    def setSubText(self, text: str) -> None:
+        self._sub_text = text
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._sub_text:
+            return
+        p = QPainter(self)
+        f = QFont()
+        f.setPixelSize(t.scaled(10))
+        p.setFont(f)
+        p.setPen(QColor(t.color("text_muted")))
+        # 下半行: 左侧留 padding, 右侧避开 drop-down 箭头
+        rect = self.rect().adjusted(t.scaled(8), self.height() // 2, -t.scaled(24), 0)
+        p.drawText(rect, Qt.AlignmentFlag.AlignVCenter, self._sub_text)
+        p.end()
+
+
 class PlayerPage(QWidget):
     """紧凑播放器页: 顶栏 / 模型+播放+时长 / 6 个硬件环."""
 
@@ -225,32 +251,6 @@ class PlayerPage(QWidget):
         lay.setContentsMargins(t.scaled(10), 0, t.scaled(10), 0)
         lay.setSpacing(t.scaled(6))
 
-        # macOS 三粒灯: 红=关闭, 黄=收窄, 绿=切换模式 (取代原 ⤢ 按钮)
-        self._traffic_btns: list[QPushButton] = []
-        for color_key, tooltip in (
-            ("traffic_red", "关闭"),
-            ("traffic_yellow", "收窄"),
-            ("traffic_green", "切换模式"),
-        ):
-            btn = QPushButton()
-            t.fixed_w(btn, 12)
-            t.fixed_h(btn, 12)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(tooltip)
-            btn.setStyleSheet(
-                f"QPushButton {{ background-color: {t.color(color_key)}; border: none; "
-                f"border-radius: {t.radius('full')}px; }}"
-            )
-            if color_key == "traffic_red":
-                btn.clicked.connect(lambda: self.closeRequested.emit())
-            elif color_key == "traffic_yellow":
-                btn.clicked.connect(lambda: self.compactRequested.emit(True))
-            else:
-                btn.clicked.connect(self._on_mode_clicked)
-            self._traffic_btns.append(btn)
-            lay.addWidget(btn)
-
-        lay.addSpacing(t.scaled(4))
         self._title = QLabel("LlamaDeck")
         self._title.setStyleSheet(f"color: {t.color('text_primary')}; background: transparent;")
         lay.addWidget(self._title)
@@ -268,17 +268,44 @@ class PlayerPage(QWidget):
         self._gpu_badge.hide()
         lay.addWidget(self._gpu_badge)
 
+        # Windows 风格三粒灯: 红=关闭, 黄=收窄, 绿=切换模式 — 放顶栏最右
+        self._traffic_btns: list[QPushButton] = []
+        for color_key, tooltip in (
+            ("traffic_red", "关闭"),
+            ("traffic_yellow", "收窄"),
+            ("traffic_green", "切换模式"),
+        ):
+            btn = QPushButton()
+            t.fixed_w(btn, 12)
+            t.fixed_h(btn, 12)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            # 确定性正圆: radius = 直径一半 (9999px 喺 10px widget 上渲染异常)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {t.color(color_key)}; border: none; "
+                f"border-radius: {t.scaled(6)}px; }}"
+            )
+            if color_key == "traffic_red":
+                btn.clicked.connect(lambda: self.closeRequested.emit())
+            elif color_key == "traffic_yellow":
+                btn.clicked.connect(lambda: self.compactRequested.emit(True))
+            else:
+                btn.clicked.connect(self._on_mode_clicked)
+            self._traffic_btns.append(btn)
+            lay.addWidget(btn)
+
     def _build_middle(self) -> QHBoxLayout:
         lay = QHBoxLayout()
         lay.setContentsMargins(t.scaled(10), 0, t.scaled(10), 0)
         lay.setSpacing(t.scaled(10))
 
-        # 左: 模型卡 — 「模型」标签紧贴 icon 上方, icon 与右侧 combo 垂直居中
+        # 左: 模型卡 — cap 贴顶, icon+combo 行喺剩余空间垂直居中
         model_col = QVBoxLayout()
         model_col.setSpacing(t.scaled(4))
         self._cap = QLabel("模型")
         self._cap.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
         model_col.addWidget(self._cap)
+        model_col.addStretch(1)
 
         model_row = QHBoxLayout()
         model_row.setSpacing(t.scaled(6))
@@ -294,17 +321,15 @@ class PlayerPage(QWidget):
                 t.COMPACT["icon_size"], t.COMPACT["icon_size"]
             )
         )
-        model_row.addWidget(icon)
+        model_row.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        combo_col = QVBoxLayout()
-        combo_col.setSpacing(0)
-        self._combo = QComboBox()
+        self._combo = _SubtitleCombo()
         self._combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        t.fixed_h(self._combo, 36)
+        t.fixed_h(self._combo, 44)  # 两行高, 同 icon 对齐
         self._combo.setStyleSheet(
             f"QComboBox {{ background-color: {t.color('input')}; color: {t.color('text_primary')}; "
             f"border: 1px solid {t.color('border')}; border-radius: {t.radius('md')}px; "
-            f"padding-left: {t.scaled(8)}px; }} "
+            f"padding-left: {t.scaled(8)}px; padding-bottom: {t.scaled(22)}px; }} "
             f"QComboBox::drop-down {{ width: {t.scaled(24)}px; border: none; }} "
             f"QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; "
             f"border-left: {t.scaled(5, floor=3)}px solid transparent; "
@@ -320,22 +345,20 @@ class PlayerPage(QWidget):
                 self._combo.setCurrentIndex(idx)
         self._combo.blockSignals(False)
         self._combo.currentIndexChanged.connect(self._on_model_changed)
-        combo_col.addWidget(self._combo)
+        model_row.addWidget(self._combo, 1, Qt.AlignmentFlag.AlignVCenter)
 
-        self._subtitle = QLabel("")
-        self._subtitle.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
-        combo_col.addWidget(self._subtitle)
-        model_row.addLayout(combo_col, 1)
         model_col.addLayout(model_row)
+        model_col.addStretch(1)
         self._update_subtitle(self._combo.currentText())
         lay.addLayout(model_col, 3)
+        lay.setAlignment(model_col, Qt.AlignmentFlag.AlignVCenter)
 
         # 中: 播放键 + 状态
         action = QHBoxLayout()
         action.setSpacing(t.scaled(8))
         self._play = _PlayButton()
         self._play.clicked.connect(self._toggle)
-        action.addWidget(self._play)
+        action.addWidget(self._play, 0, Qt.AlignmentFlag.AlignVCenter)
 
         status_col = QVBoxLayout()
         status_row = QHBoxLayout()
@@ -351,20 +374,25 @@ class PlayerPage(QWidget):
         status_row.addStretch(1)
         status_col.addLayout(status_row)
         action.addLayout(status_col, 1)
+        action.setAlignment(status_col, Qt.AlignmentFlag.AlignVCenter)
         lay.addLayout(action, 2)
+        lay.setAlignment(action, Qt.AlignmentFlag.AlignVCenter)
 
-        # 右: 运行时长
+        # 右: 运行时长 — 标签紧贴大字上方, 整组垂直居中于播放键中线
         uptime_col = QVBoxLayout()
-        uptime_col.setSpacing(0)
+        uptime_col.setSpacing(t.scaled(4))
+        uptime_col.addStretch(1)
         self._up_label = QLabel("运行时长")
-        self._up_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._up_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
         self._up_label.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
         uptime_col.addWidget(self._up_label)
         self._uptime = QLabel("00:00:00")
-        self._uptime.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._uptime.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._uptime.setStyleSheet(f"color: {t.color('text_primary')}; background: transparent;")
         uptime_col.addWidget(self._uptime)
+        uptime_col.addStretch(1)
         lay.addLayout(uptime_col, 2)
+        lay.setAlignment(uptime_col, Qt.AlignmentFlag.AlignVCenter)
         return lay
 
     def _build_gauges(self) -> QHBoxLayout:
@@ -392,7 +420,6 @@ class PlayerPage(QWidget):
             (self._gpu_badge, 10, False),
             (self._cap, 10, False),
             (self._combo, 13, True),
-            (self._subtitle, 11, False),
             (self._dot, 11, False),
             (self._status_text, 11, False),
             (self._up_label, 10, False),
@@ -451,9 +478,9 @@ class PlayerPage(QWidget):
             stem,
         )
         if params and quant:
-            self._subtitle.setText(f"{params.group(1)}B 参数 · {quant.group(1)} 量化")
+            self._combo.setSubText(f"{params.group(1)}B 参数 · {quant.group(1)} 量化")
         else:
-            self._subtitle.setText(stem or model)
+            self._combo.setSubText(stem or model)
 
     def mark_failed(self) -> None:
         """MainWindow 在 health 不可达时同步标记失败 (与 sidebar pill 同源)."""
