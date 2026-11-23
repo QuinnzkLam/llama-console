@@ -5,13 +5,14 @@
 播放键 / Space 与 sidebar 启动/停止共用同一组 MainWindow 回调.
 """
 import re
+import sys
 import time
 from pathlib import Path
 
 import psutil
 from PySide6.QtCore import Qt, QPoint, QRectF, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QKeySequence, QLinearGradient, QMouseEvent,
+    QBrush, QColor, QFont, QIcon, QKeySequence, QLinearGradient, QMouseEvent,
     QPainter, QPainterPath, QPen, QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -199,7 +200,8 @@ class PlayerPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addLayout(self._build_top_bar())
+        self._build_top_bar()
+        root.addWidget(self._top_bar)  # 必须收纳 _DragBar widget 本身, 唔系只收内部 layout
         root.addLayout(self._build_middle())
         root.addLayout(self._build_gauges())
         self._apply_compact_font()
@@ -215,7 +217,7 @@ class PlayerPage(QWidget):
         self._refresh()
 
     # ---------------- 构建 ----------------
-    def _build_top_bar(self) -> QHBoxLayout:
+    def _build_top_bar(self) -> None:
         self._top_bar = _DragBar()
         t.fixed_h(self._top_bar, t.COMPACT["topbar_height"])
         self._top_bar.setStyleSheet("background: transparent; border: none;")
@@ -265,28 +267,32 @@ class PlayerPage(QWidget):
         )
         self._gpu_badge.hide()
         lay.addWidget(self._gpu_badge)
-        return lay
 
     def _build_middle(self) -> QHBoxLayout:
         lay = QHBoxLayout()
         lay.setContentsMargins(t.scaled(10), 0, t.scaled(10), 0)
         lay.setSpacing(t.scaled(10))
 
-        # 左: 模型卡
+        # 左: 模型卡 — 「模型」标签紧贴 icon 上方, icon 与右侧 combo 垂直居中
         model_col = QVBoxLayout()
+        model_col.setSpacing(t.scaled(4))
         self._cap = QLabel("模型")
         self._cap.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
         model_col.addWidget(self._cap)
 
         model_row = QHBoxLayout()
         model_row.setSpacing(t.scaled(6))
+        model_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         icon = QLabel()
         t.fixed_w(icon, t.COMPACT["icon_size"])
         t.fixed_h(icon, t.COMPACT["icon_size"])
-        icon.setStyleSheet(
-            f"background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
-            f"stop:0 {t.COMPACT['icon_start']}, stop:1 {t.COMPACT['icon_end']}); "
-            f"border-radius: {t.scaled(10)}px;"
+        # 真 icon: 开发机用 repo assets, onefile 用 PyInstaller 解包目录 (spec datas 已加)
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+        icon.setScaledContents(True)  # 跟随 t.scaled 后的实际 widget 尺寸, 避免 44px 原图被裁
+        icon.setPixmap(
+            QIcon(str(base / "assets" / "LlamaDeck.ico")).pixmap(
+                t.COMPACT["icon_size"], t.COMPACT["icon_size"]
+            )
         )
         model_row.addWidget(icon)
 
