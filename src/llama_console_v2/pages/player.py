@@ -30,6 +30,7 @@ _STATE_VIEW = {
     "idle":     ("待启动",   "danger",  False),
     "starting": ("启动中",   "warning", True),
     "running":  ("运行中",   "success", True),
+    "stopping": ("关闭中",   "warning", False),
     "failed":   ("启动失败", "danger",  False),
 }
 _BORDER_COLOR = {
@@ -38,6 +39,8 @@ _BORDER_COLOR = {
 
 
 def _state_key(state: str) -> str:
+    if state == "stopping":
+        return "stopping"
     if state == "running":
         return "running"
     if state in ("loading", "starting"):
@@ -308,6 +311,7 @@ class PlayerPage(QWidget):
             self._place_expand_button()
         self._apply_compact_font()
         self._reposition_cap()
+        QTimer.singleShot(0, self._reposition_cap)  # layout 完成後重擺一次
 
         # Space: 聚焦 combobox 时放行给下拉框 (见 _toggle 的焦点检查)
         self._space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
@@ -521,6 +525,8 @@ class PlayerPage(QWidget):
             self._start_ts = None
             self._runningish = False
             self._play.setRunning(False)
+            self._force_state = "stopping"   # 立即顯示「關閉中」橙色, 唔等 poll
+            self._last_key = None
             self.stopRequested.emit()
         else:
             self._start_ts = time.time()
@@ -645,7 +651,11 @@ class PlayerPage(QWidget):
                 # 最后兜底: 扫全部 llama*.exe, 攞最早 create_time
                 try:
                     for p in psutil.process_iter(["pid", "create_time", "name"]):
-                        if backend_llama._LLAMA_PROCESS_PATTERN.match(p.info.get("name") or ""):
+                        pname = (p.info.get("name") or "")
+                        # 排除 GUI 本體 (LlamaDeck.exe) 同 launcher stub — 淨計真 server
+                        if pname.lower() == "llamadeck.exe":
+                            continue
+                        if backend_llama._LLAMA_PROCESS_PATTERN.match(pname):
                             ctime = p.info.get("create_time")
                             if ctime:
                                 created.append(float(ctime))
