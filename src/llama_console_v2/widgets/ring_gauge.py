@@ -66,7 +66,7 @@ class RingGauge(QWidget):
 
         # 环内: 百分比大字居中
         value_font = QFont()
-        value_font.setPointSize(t.FONT_SIZE["xs"])
+        value_font.setPixelSize(t.scaled(12))
         value_font.setBold(True)
         p.setFont(value_font)
         p.setPen(QColor(t.color("text_primary")))
@@ -74,9 +74,9 @@ class RingGauge(QWidget):
 
         # 环下: 标签 / 单位 (小字, 允许 "21.6/64 GB" 这类较长文本)
         sub_font = QFont()
-        sub_font.setPointSize(t.FONT_SIZE["xs"])
+        sub_font.setPixelSize(t.scaled(10))
         if len(self._sub_text) > 6:
-            sub_font.setPointSize(max(7, t.FONT_SIZE["xs"] - 2))
+            sub_font.setPixelSize(max(7, t.scaled(9)))
         p.setFont(sub_font)
         p.setPen(QColor(t.color("text_muted")))
         sub_top = diameter + t.scaled(2, floor=1)

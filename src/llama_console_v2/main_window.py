@@ -228,6 +228,7 @@ class MainWindow(QMainWindow):
         self._player_page.startRequested.connect(self._on_sidebar_start)
         self._player_page.stopRequested.connect(self._on_sidebar_stop)
         self._player_page.compactRequested.connect(self.set_compact)
+        self._player_page.closeRequested.connect(self.close)
         self._player_page.borderColorChanged.connect(self._compact_frame.set_border_color)
         esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         esc_shortcut.activated.connect(lambda: self.set_compact(True) if self._compact else None)

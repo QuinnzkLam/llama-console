@@ -183,6 +183,7 @@ class PlayerPage(QWidget):
     startRequested = Signal()
     stopRequested = Signal()
     compactRequested = Signal(bool)
+    closeRequested = Signal()
     borderColorChanged = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -201,6 +202,7 @@ class PlayerPage(QWidget):
         root.addLayout(self._build_top_bar())
         root.addLayout(self._build_middle())
         root.addLayout(self._build_gauges())
+        self._apply_compact_font()
 
         # Space: 聚焦 combobox 时放行给下拉框 (见 _toggle 的焦点检查)
         self._space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
@@ -219,21 +221,41 @@ class PlayerPage(QWidget):
         self._top_bar.setStyleSheet("background: transparent; border: none;")
         lay = QHBoxLayout(self._top_bar)
         lay.setContentsMargins(t.scaled(10), 0, t.scaled(10), 0)
-        lay.setSpacing(t.scaled(4))
+        lay.setSpacing(t.scaled(6))
 
-        title = QLabel("LlamaDeck")
-        f = QFont()
-        f.setPointSize(t.FONT_SIZE["md"])
-        f.setBold(True)
-        title.setFont(f)
-        lay.addWidget(title)
+        # macOS 三粒灯: 红=关闭, 黄=收窄, 绿=切换模式 (取代原 ⤢ 按钮)
+        self._traffic_btns: list[QPushButton] = []
+        for color_key, tooltip in (
+            ("traffic_red", "关闭"),
+            ("traffic_yellow", "收窄"),
+            ("traffic_green", "切换模式"),
+        ):
+            btn = QPushButton()
+            t.fixed_w(btn, 12)
+            t.fixed_h(btn, 12)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {t.color(color_key)}; border: none; "
+                f"border-radius: {t.radius('full')}px; }}"
+            )
+            if color_key == "traffic_red":
+                btn.clicked.connect(lambda: self.closeRequested.emit())
+            elif color_key == "traffic_yellow":
+                btn.clicked.connect(lambda: self.compactRequested.emit(True))
+            else:
+                btn.clicked.connect(self._on_mode_clicked)
+            self._traffic_btns.append(btn)
+            lay.addWidget(btn)
 
-        sub = QLabel("本地推理")
-        sub.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
-        sub_f = QFont()
-        sub_f.setPointSize(t.FONT_SIZE["xs"])
-        sub.setFont(sub_f)
-        lay.addWidget(sub)
+        lay.addSpacing(t.scaled(4))
+        self._title = QLabel("LlamaDeck")
+        self._title.setStyleSheet(f"color: {t.color('text_primary')}; background: transparent;")
+        lay.addWidget(self._title)
+
+        self._sub = QLabel("本地推理")
+        self._sub.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
+        lay.addWidget(self._sub)
         lay.addStretch(1)
 
         self._gpu_badge = QLabel("")
@@ -241,22 +263,8 @@ class PlayerPage(QWidget):
             f"color: {t.color('text_secondary')}; background-color: {t.color('card_hover')}; "
             f"border-radius: {t.radius('xl')}px; padding: {t.scaled(3)}px {t.scaled(8)}px;"
         )
-        badge_f = QFont()
-        badge_f.setPointSize(t.FONT_SIZE["xs"])
-        self._gpu_badge.setFont(badge_f)
         self._gpu_badge.hide()
         lay.addWidget(self._gpu_badge)
-
-        self._mode_btn = QPushButton("⤢")
-        self._mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mode_btn.setToolTip("展开 / 收窄")
-        self._mode_btn.setStyleSheet(
-            f"QPushButton {{ color: {t.color('text_secondary')}; background: transparent; "
-            f"border: none; font-size: {t.FONT_SIZE['lg']}pt; }} "
-            f"QPushButton:hover {{ color: {t.color('text_primary')}; }}"
-        )
-        self._mode_btn.clicked.connect(self._on_mode_clicked)
-        lay.addWidget(self._mode_btn)
         return lay
 
     def _build_middle(self) -> QHBoxLayout:
@@ -266,12 +274,9 @@ class PlayerPage(QWidget):
 
         # 左: 模型卡
         model_col = QVBoxLayout()
-        cap = QLabel("模型")
-        cap.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
-        cap_f = QFont()
-        cap_f.setPointSize(t.FONT_SIZE["xs"])
-        cap.setFont(cap_f)
-        model_col.addWidget(cap)
+        self._cap = QLabel("模型")
+        self._cap.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
+        model_col.addWidget(self._cap)
 
         model_row = QHBoxLayout()
         model_row.setSpacing(t.scaled(6))
@@ -309,17 +314,10 @@ class PlayerPage(QWidget):
                 self._combo.setCurrentIndex(idx)
         self._combo.blockSignals(False)
         self._combo.currentIndexChanged.connect(self._on_model_changed)
-        combo_f = QFont()
-        combo_f.setPointSize(t.FONT_SIZE["sm"])
-        combo_f.setBold(True)
-        self._combo.setFont(combo_f)
         combo_col.addWidget(self._combo)
 
         self._subtitle = QLabel("")
         self._subtitle.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
-        sub_f = QFont()
-        sub_f.setPointSize(t.FONT_SIZE["xs"])
-        self._subtitle.setFont(sub_f)
         combo_col.addWidget(self._subtitle)
         model_row.addLayout(combo_col, 1)
         model_col.addLayout(model_row)
@@ -338,14 +336,8 @@ class PlayerPage(QWidget):
         status_row.setSpacing(t.scaled(4))
         self._dot = QLabel("●")
         self._dot.setStyleSheet(f"color: {t.color('danger')}; background: transparent;")
-        dot_f = QFont()
-        dot_f.setPointSize(t.FONT_SIZE["sm"])
-        self._dot.setFont(dot_f)
         status_row.addWidget(self._dot)
         self._status_text = QLabel("待启动")
-        status_f = QFont()
-        status_f.setPointSize(t.FONT_SIZE["sm"])
-        self._status_text.setFont(status_f)
         status_row.addWidget(self._status_text)
         self._bars = _PulseBars()
         self._bars.hide()
@@ -358,21 +350,13 @@ class PlayerPage(QWidget):
         # 右: 运行时长
         uptime_col = QVBoxLayout()
         uptime_col.setSpacing(0)
-        up_label = QLabel("运行时长")
-        up_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        up_label.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
-        up_f = QFont()
-        up_f.setPointSize(t.FONT_SIZE["xs"])
-        up_label.setFont(up_f)
-        uptime_col.addWidget(up_label)
+        self._up_label = QLabel("运行时长")
+        self._up_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._up_label.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
+        uptime_col.addWidget(self._up_label)
         self._uptime = QLabel("00:00:00")
         self._uptime.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._uptime.setStyleSheet(f"color: {t.color('text_primary')}; background: transparent;")
-        big_f = QFont()
-        big_f.setPointSize(t.FONT_SIZE["2xl"])
-        big_f.setBold(True)
-        big_f.setFamily(t.FONT_FAMILY_MONO.split(",")[0].strip('" '))
-        self._uptime.setFont(big_f)
         uptime_col.addWidget(self._uptime)
         lay.addLayout(uptime_col, 2)
         return lay
@@ -394,13 +378,36 @@ class PlayerPage(QWidget):
         return lay
 
     # ---------------- 交互 ----------------
+    def _apply_compact_font(self) -> None:
+        """按当前 font_scale 以像素字号重设全部文字, 避免展开 scale 固化到 QLabel."""
+        specs = (
+            (self._title, 15, True),
+            (self._sub, 10, False),
+            (self._gpu_badge, 10, False),
+            (self._cap, 10, False),
+            (self._combo, 13, True),
+            (self._subtitle, 11, False),
+            (self._dot, 11, False),
+            (self._status_text, 11, False),
+            (self._up_label, 10, False),
+            (self._uptime, 24, True),
+        )
+        for widget, px, bold in specs:
+            font = QFont()
+            font.setPixelSize(t.scaled(px))
+            font.setBold(bold)
+            widget.setFont(font)
+        mono = self._uptime.font()
+        mono.setFamily(t.FONT_FAMILY_MONO.split(",")[0].strip('" '))
+        self._uptime.setFont(mono)
+
     def _on_mode_clicked(self) -> None:
         self.compactRequested.emit(not self._compact)
 
     def set_compact_mode(self, compact: bool) -> None:
-        """由 MainWindow 在模式切换后同步展开/收窄按钮图标."""
+        """由 MainWindow 在模式切换后重算字号 (t.scaled 跟随当前 font_scale)."""
         self._compact = compact
-        self._mode_btn.setText("⤢" if compact else "⤡")
+        self._apply_compact_font()
 
     def _toggle(self) -> None:
         """Space / 播放键: 与 sidebar 共用同一状态源, 不自己调 backend."""
@@ -509,7 +516,7 @@ class PlayerPage(QWidget):
                 f"{v_used / 1024:.1f}/{v_total / 1024:.0f} GB",
             )
         for i, gauge in enumerate(self._gauges[2:]):
-            gauge.setVisible(i < len(gpus))
+            gauge.setVisible(i // 2 < len(gpus))  # 每 GPU 两个环: 0,1→GPU0  2,3→GPU1
         self._no_gpu.setVisible(not gpus)
 
     def _uptime_text(self, state: str, pid) -> str:

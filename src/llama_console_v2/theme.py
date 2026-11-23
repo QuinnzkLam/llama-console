@@ -316,12 +316,15 @@ COMPACT = {
     "border_width":  2,
     "frame_margin":  14,   # 圆角卡离窗口边的透明留白 (给阴影用)
     "shadow_blur":   24,
-    "topbar_height": 44,
+    "topbar_height": 40,
     "icon_size":     44,
     "play_diameter": 88,
     "gauge_diameter": 62,
     "icon_start":    "#6366f1",  # 模型卡紫蓝渐变
     "icon_end":      "#a855f7",
+    "traffic_red":    "#ff5f57",  # macOS 三粒灯
+    "traffic_yellow": "#febc2e",
+    "traffic_green":  "#28c840",
 }
 
 RING = {
