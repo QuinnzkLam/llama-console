@@ -67,8 +67,8 @@ def _apply_font(app: QApplication) -> None:
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("llama-console")
-    app.setApplicationDisplayName("llama-server")
+    app.setApplicationName("llamadeck")
+    app.setApplicationDisplayName("LlamaDeck")
     app.setOrganizationName("Quinn")
     app.setStyle("Fusion")
 
