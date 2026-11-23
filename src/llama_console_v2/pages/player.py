@@ -9,10 +9,10 @@ import time
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import Qt, QPoint, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QRectF, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QKeySequence, QLinearGradient, QMouseEvent,
-    QPainter, QPainterPath, QPen, QRectF, QShortcut,
+    QPainter, QPainterPath, QPen, QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
