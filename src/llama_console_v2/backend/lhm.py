@@ -58,7 +58,7 @@ def _init_computer() -> bool:
     _COMPUTER = computer
     _GPU_GROUPS = []
     for hw in getattr(computer, "Hardware", []) or []:
-        htype = str(getattr(hw, "HardwareType", "")).lower()
+        htype = str(getattr(hw, "HardwareType", "")).split(".")[-1].lower()
         if "gpu" not in htype:
             continue
         sensors: list = []
@@ -78,7 +78,8 @@ def _find(sensors, needles: tuple[str, ...], sensor_type: str | None = None):
     for s in sensors:
         name = (getattr(s, "Name", "") or "").lower()
         ident = str(getattr(s, "Identifier", "") or "").lower()
-        if sensor_type and sensor_type not in str(getattr(s, "SensorType", "")).lower():
+        stype_name = str(getattr(s, "SensorType", "")).split(".")[-1].lower()
+        if sensor_type and sensor_type != stype_name:
             continue
         if any(n in name or n in ident for n in needles):
             value = getattr(s, "Value", None)
