@@ -322,7 +322,7 @@ COMPACT = {
     "topbar_height": 40,
     "icon_size":     44,
     "play_diameter": 88,
-    "gauge_diameter": 62,
+    "gauge_diameter": 64,
     "icon_start":    "#6366f1",  # 模型卡紫蓝渐变
     "icon_end":      "#a855f7",
     "traffic_red":    "#ff5f57",  # macOS 三粒灯
@@ -335,4 +335,21 @@ RING = {
     "end":      "#22d3ee",   # 数值弧渐变终点 (青)
     "base":     "#2a2a2a",   # 底环深灰
     "span_deg": 270,
+}
+
+# 展开模式单页 Dashboard (Option A) — 卡与放大版播放器尺寸
+DASH = {
+    "radius":         14,
+    "margin":         20,
+    "combo_height":   60,   # t.scaled 后 ≈48px (展开 scale ~0.8)
+    "icon_size":      60,
+    "play_diameter":  110,  # ≈88px
+    "uptime_px":      38,   # ≈30px
+    "combo_main_px":  16,
+    "combo_sub_px":   12,
+    "title_px":       15,
+    "body_px":        12,
+    "muted_px":       10,
+    "card_gap":       12,
+    "topbar_height":  44,
 }

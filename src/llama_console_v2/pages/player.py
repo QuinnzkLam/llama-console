@@ -79,14 +79,15 @@ class _PlayButton(QWidget):
 
     clicked = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, diameter: int | None = None) -> None:
         super().__init__(parent)
         self._running = False
         self._hover = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        t.fixed_w(self, t.COMPACT["play_diameter"])
-        t.fixed_h(self, t.COMPACT["play_diameter"])
+        d = diameter or t.COMPACT["play_diameter"]
+        t.fixed_w(self, d)
+        t.fixed_h(self, d)
 
     def setRunning(self, running: bool) -> None:
         if self._running != running:
@@ -184,9 +185,14 @@ class _SubtitleCombo(QComboBox):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._sub_text = ""
+        self._sub_px = 10
 
     def setSubText(self, text: str) -> None:
         self._sub_text = text
+        self.update()
+
+    def setSubPixel(self, px: int) -> None:
+        self._sub_px = px
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -195,7 +201,7 @@ class _SubtitleCombo(QComboBox):
             return
         p = QPainter(self)
         f = QFont()
-        f.setPixelSize(t.scaled(10))
+        f.setPixelSize(t.scaled(self._sub_px))
         p.setFont(f)
         p.setPen(QColor(t.color("text_muted")))
         # 下半行: 左侧留 padding, 右侧避开 drop-down 箭头
@@ -204,8 +210,43 @@ class _SubtitleCombo(QComboBox):
         p.end()
 
 
+class _ExpandButton(QPushButton):
+    """窗口右下角自绘对角双向箭头 (紧凑展开 / 展开收窄)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("展开 / 收窄")
+        t.fixed_w(self, 28)
+        t.fixed_h(self, 28)
+        self.setStyleSheet(
+            f"QPushButton {{ background-color: {t.color('card_hover')}; "
+            f"border: 1px solid {t.color('border')}; "
+            f"border-radius: {t.scaled(6)}px; }}"
+        )
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(t.color("text_secondary")), max(1, t.scaled(2, floor=1)))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        c = self.rect().center()
+        r, head = t.scaled(7), t.scaled(4)
+        p.drawLine(c.x() - r, c.y() + r, c.x() + r, c.y() - r)
+        p.drawLine(c.x() + r, c.y() - r, c.x() + r - head, c.y() - r)
+        p.drawLine(c.x() + r, c.y() - r, c.x() + r, c.y() - r + head)
+        p.drawLine(c.x() - r, c.y() + r, c.x() - r + head, c.y() + r)
+        p.drawLine(c.x() - r, c.y() + r, c.x() - r, c.y() + r - head)
+        p.end()
+
+
 class PlayerPage(QWidget):
-    """紧凑播放器页: 顶栏 / 模型+播放+时长 / 6 个硬件环."""
+    """紧凑播放器页: 顶栏 / 模型+播放+时长 / 6 个硬件环.
+
+    embedded=True 时只保留中段, 供展开模式 DashboardPage 内嵌复用.
+    """
 
     startRequested = Signal()
     stopRequested = Signal()
@@ -213,10 +254,11 @@ class PlayerPage(QWidget):
     closeRequested = Signal()
     borderColorChanged = Signal(str)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, embedded: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("PlayerPage")
         self.setStyleSheet("background: transparent; border: none;")
+        self._embedded = embedded
         self._force_state: str | None = None
         self._last_key: str | None = None
         self._runningish = False
@@ -226,10 +268,15 @@ class PlayerPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self._build_top_bar()
-        root.addWidget(self._top_bar)  # 必须收纳 _DragBar widget 本身, 唔系只收内部 layout
+        if not embedded:
+            self._build_top_bar()
+            root.addWidget(self._top_bar)  # 必须收纳 _DragBar widget 本身, 唔系只收内部 layout
         root.addLayout(self._build_middle())
-        root.addLayout(self._build_gauges())
+        if not embedded:
+            root.addLayout(self._build_gauges())
+            self._expand_btn = _ExpandButton(self)
+            self._expand_btn.clicked.connect(self._on_mode_clicked)
+            self._place_expand_button()
         self._apply_compact_font()
 
         # Space: 聚焦 combobox 时放行给下拉框 (见 _toggle 的焦点检查)
@@ -255,44 +302,20 @@ class PlayerPage(QWidget):
         self._title.setStyleSheet(f"color: {t.color('text_primary')}; background: transparent;")
         lay.addWidget(self._title)
 
-        self._sub = QLabel("本地推理")
-        self._sub.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
-        lay.addWidget(self._sub)
         lay.addStretch(1)
 
-        self._gpu_badge = QLabel("")
-        self._gpu_badge.setStyleSheet(
-            f"color: {t.color('text_secondary')}; background-color: {t.color('card_hover')}; "
-            f"border-radius: {t.radius('xl')}px; padding: {t.scaled(3)}px {t.scaled(8)}px;"
+        # 净剩红灯 (关闭) — 顶栏最右; 展开入口改右下角 _ExpandButton
+        self._red_btn = QPushButton()
+        t.fixed_w(self._red_btn, 12)
+        t.fixed_h(self._red_btn, 12)
+        self._red_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._red_btn.setToolTip("关闭")
+        self._red_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {t.color('traffic_red')}; border: none; "
+            f"border-radius: {t.scaled(6)}px; }}"
         )
-        self._gpu_badge.hide()
-        lay.addWidget(self._gpu_badge)
-
-        # Windows 风格三粒灯: 红=关闭, 黄=收窄, 绿=切换模式 — 放顶栏最右
-        self._traffic_btns: list[QPushButton] = []
-        for color_key, tooltip in (
-            ("traffic_red", "关闭"),
-            ("traffic_yellow", "收窄"),
-            ("traffic_green", "切换模式"),
-        ):
-            btn = QPushButton()
-            t.fixed_w(btn, 12)
-            t.fixed_h(btn, 12)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(tooltip)
-            # 确定性正圆: radius = 直径一半 (9999px 喺 10px widget 上渲染异常)
-            btn.setStyleSheet(
-                f"QPushButton {{ background-color: {t.color(color_key)}; border: none; "
-                f"border-radius: {t.scaled(6)}px; }}"
-            )
-            if color_key == "traffic_red":
-                btn.clicked.connect(lambda: self.closeRequested.emit())
-            elif color_key == "traffic_yellow":
-                btn.clicked.connect(lambda: self.compactRequested.emit(True))
-            else:
-                btn.clicked.connect(self._on_mode_clicked)
-            self._traffic_btns.append(btn)
-            lay.addWidget(btn)
+        self._red_btn.clicked.connect(lambda: self.closeRequested.emit())
+        lay.addWidget(self._red_btn)
 
     def _build_middle(self) -> QHBoxLayout:
         lay = QHBoxLayout()
@@ -310,22 +333,21 @@ class PlayerPage(QWidget):
         model_row = QHBoxLayout()
         model_row.setSpacing(t.scaled(6))
         model_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        icon_px = t.DASH["icon_size"] if self._embedded else t.COMPACT["icon_size"]
         icon = QLabel()
-        t.fixed_w(icon, t.COMPACT["icon_size"])
-        t.fixed_h(icon, t.COMPACT["icon_size"])
+        t.fixed_w(icon, icon_px)
+        t.fixed_h(icon, icon_px)
         # 真 icon: 开发机用 repo assets, onefile 用 PyInstaller 解包目录 (spec datas 已加)
         base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
         icon.setScaledContents(True)  # 跟随 t.scaled 后的实际 widget 尺寸, 避免 44px 原图被裁
-        icon.setPixmap(
-            QIcon(str(base / "assets" / "LlamaDeck.ico")).pixmap(
-                t.COMPACT["icon_size"], t.COMPACT["icon_size"]
-            )
-        )
+        icon.setPixmap(QIcon(str(base / "assets" / "LlamaDeck.ico")).pixmap(icon_px, icon_px))
         model_row.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._combo = _SubtitleCombo()
         self._combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        t.fixed_h(self._combo, 44)  # 两行高, 同 icon 对齐
+        t.fixed_h(self._combo, t.DASH["combo_height"] if self._embedded else 44)
+        if self._embedded:
+            self._combo.setSubPixel(t.DASH["combo_sub_px"])
         self._combo.setStyleSheet(
             f"QComboBox {{ background-color: {t.color('input')}; color: {t.color('text_primary')}; "
             f"border: 1px solid {t.color('border')}; border-radius: {t.radius('md')}px; "
@@ -356,7 +378,9 @@ class PlayerPage(QWidget):
         # 中: 播放键 + 状态
         action = QHBoxLayout()
         action.setSpacing(t.scaled(8))
-        self._play = _PlayButton()
+        self._play = _PlayButton(
+            diameter=t.DASH["play_diameter"] if self._embedded else None
+        )
         self._play.clicked.connect(self._toggle)
         action.addWidget(self._play, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -397,7 +421,7 @@ class PlayerPage(QWidget):
 
     def _build_gauges(self) -> QHBoxLayout:
         lay = QHBoxLayout()
-        lay.setContentsMargins(t.scaled(10), t.scaled(4), t.scaled(10), t.scaled(6))
+        lay.setContentsMargins(t.scaled(10), t.scaled(4), t.scaled(44), t.scaled(6))
         lay.setSpacing(t.scaled(6))
         self._gauges: list[RingGauge] = []
         for label in ("CPU", "内存", "GPU0·核心", "GPU0·显存", "GPU1·核心", "GPU1·显存"):
@@ -414,17 +438,16 @@ class PlayerPage(QWidget):
     # ---------------- 交互 ----------------
     def _apply_compact_font(self) -> None:
         """按当前 font_scale 以像素字号重设全部文字, 避免展开 scale 固化到 QLabel."""
-        specs = (
-            (self._title, 15, True),
-            (self._sub, 10, False),
-            (self._gpu_badge, 10, False),
-            (self._cap, 10, False),
-            (self._combo, 13, True),
+        specs = [(self._cap, t.DASH["muted_px"] if self._embedded else 10, False)]
+        if not self._embedded:
+            specs.insert(0, (self._title, 15, True))
+        specs += [
+            (self._combo, t.DASH["combo_main_px"] if self._embedded else 13, True),
             (self._dot, 11, False),
             (self._status_text, 11, False),
-            (self._up_label, 10, False),
-            (self._uptime, 24, True),
-        )
+            (self._up_label, t.DASH["muted_px"] if self._embedded else 10, False),
+            (self._uptime, t.DASH["uptime_px"] if self._embedded else 24, True),
+        ]
         for widget, px, bold in specs:
             font = QFont()
             font.setPixelSize(t.scaled(px))
@@ -441,6 +464,17 @@ class PlayerPage(QWidget):
         """由 MainWindow 在模式切换后重算字号 (t.scaled 跟随当前 font_scale)."""
         self._compact = compact
         self._apply_compact_font()
+
+    def _place_expand_button(self) -> None:
+        btn = getattr(self, "_expand_btn", None)
+        if btn is not None:
+            m = t.scaled(8)
+            btn.move(self.width() - btn.width() - m, self.height() - btn.height() - m)
+            btn.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place_expand_button()
 
     def _toggle(self) -> None:
         """Space / 播放键: 与 sidebar 共用同一状态源, 不自己调 backend."""
@@ -516,13 +550,13 @@ class PlayerPage(QWidget):
             self.borderColorChanged.emit(t.color(color_key))
         self._uptime.setText(self._uptime_text(state, pid))
 
+        if self._embedded:  # Dashboard 自带 6 环, 内嵌播放器唔重复采样
+            return
         try:
             hw = backend_hw.snapshot()
             cpu, ram, gpus = hw.cpu, hw.ram, hw.gpus
         except Exception:  # noqa: BLE001
             cpu, ram, gpus = None, None, []
-        self._gpu_badge.setText(f"{len(gpus)} × GPU")
-        self._gpu_badge.setVisible(bool(gpus))
         self._apply_gauges(cpu, ram, gpus)
 
     def _apply_gauges(self, cpu, ram, gpus) -> None:

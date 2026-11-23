@@ -30,8 +30,10 @@ from PySide6.QtWidgets import (
 
 from llama_console_v2 import theme as t
 from llama_console_v2.pages.console import ConsolePage
+from llama_console_v2.pages.dashboard import DashboardPage
 from llama_console_v2.pages.player import PlayerPage
 from llama_console_v2.pages.settings import SettingsPage
+from llama_console_v2.pages.settings_dialog import SettingsDialog
 from llama_console_v2.widgets.server_control import ServerControlSidebar
 from llama_console_v2.backend import llama_cpp as backend_llama
 from llama_console_v2.backend import frp as backend_frp  # 2026-08-31 (B1): GUI 启停同步启停 frp
@@ -224,12 +226,22 @@ class MainWindow(QMainWindow):
         self._frame_layout.setSpacing(0)
         root_layout.addWidget(self._compact_frame, 1)
 
+        # 展开模式: 单页 Dashboard (旧 sidebar + stack 保留作状态机回调, 不再显示)
+        self._dashboard_page = DashboardPage()
+        root_layout.addWidget(self._dashboard_page, 1)
+        self._dashboard_page.hide()
+
         # 播放键 / Space 与 sidebar 共用同一组 start/stop 回调
         self._player_page.startRequested.connect(self._on_sidebar_start)
         self._player_page.stopRequested.connect(self._on_sidebar_stop)
         self._player_page.compactRequested.connect(self.set_compact)
         self._player_page.closeRequested.connect(self.close)
         self._player_page.borderColorChanged.connect(self._compact_frame.set_border_color)
+        self._dashboard_page.compactRequested.connect(self.set_compact)
+        self._dashboard_page.closeRequested.connect(self.close)
+        self._dashboard_page.settingsRequested.connect(self._open_settings)
+        self._dashboard_page.startRequested.connect(self._on_sidebar_start)
+        self._dashboard_page.stopRequested.connect(self._on_sidebar_stop)
         esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         esc_shortcut.activated.connect(lambda: self.set_compact(True) if self._compact else None)
 
@@ -539,8 +551,12 @@ class MainWindow(QMainWindow):
         if index == 0:
             self._console_page.refresh()
 
+    def _open_settings(self) -> None:
+        dlg = SettingsDialog(self)
+        dlg.exec()
+
     def set_compact(self, compact: bool) -> None:
-        """紧凑 frameless 播放器 ↔ 展开正常窗口 (含系统标题栏)."""
+        """紧凑 frameless 播放器 ↔ 展开单页 Dashboard."""
         if self._compact == compact:
             return
         was_visible = self.isVisible()
@@ -551,8 +567,10 @@ class MainWindow(QMainWindow):
             t.set_font_scale(t.COMPACT["font_scale"])
             t.rescale_all_geometries()
             self._compact_frame.set_border_color(self._player_page.border_color())
-            self._body_layout.removeWidget(self._stack)
-            self._frame_layout.addWidget(self._stack, 1)
+            if self._stack.parent() is not self._compact_frame:
+                self._body_layout.removeWidget(self._stack)
+                self._frame_layout.addWidget(self._stack, 1)
+            self._dashboard_page.hide()
             self._body.hide()
             self._error_banner.hide()
             self._compact_frame.show()
@@ -562,10 +580,10 @@ class MainWindow(QMainWindow):
             self.setStyleSheet("background: transparent;")
             self.setFixedSize(t.scaled(t.COMPACT["width"]), t.scaled(t.COMPACT["height"]))
         else:
-            self._frame_layout.removeWidget(self._stack)
-            self._body_layout.addWidget(self._stack, 1)
+            # Option A: 展开显示单页 Dashboard; sidebar + stack 唔再显示
             self._compact_frame.hide()
-            self._body.show()
+            self._body.hide()
+            self._dashboard_page.show()
             self.setWindowFlags(self._normal_flags)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
             self.setStyleSheet(f"background-color: {t.color('bg')};")

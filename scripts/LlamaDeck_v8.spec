@@ -30,7 +30,7 @@ for pkg_name in ['llama_console_v2',
 # explicit safety nets
     hidden += ['email', 'email.message', 'email.utils', 'email.parser', 'email.feedparser', 'email._policybase', 'email._encoded_words', 'email.charset', 'email.base64mime', 'email.quoprimime', 'urllib', 'urllib.request', 'urllib.parse', 'urllib.error']
 hidden += ['app', 'theme', 'main_window', 'backend',
-           'pages.console', 'pages.settings',
+           'pages.console', 'pages.settings', 'pages.dashboard', 'pages.settings_dialog',
            'widgets.card', 'widgets.buttons', 'widgets.chip_icon',
            'widgets.key_value', 'widgets.page_chrome', 'widgets.progress_bar',
            'widgets.server_control', 'widgets.stat_block', 'widgets.status_pill',
