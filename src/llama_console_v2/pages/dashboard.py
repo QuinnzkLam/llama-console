@@ -127,7 +127,7 @@ class DashboardPage(QWidget):
         root.addStretch(1)
 
         # 展开模式收窄入口: 右下角同款双向箭头按钮
-        self._expand_btn = _ExpandButton(self)
+        self._expand_btn = _ExpandButton(self, direction="collapse")
         self._expand_btn.setToolTip("收窄")
         self._expand_btn.clicked.connect(lambda: self.compactRequested.emit(True))
         self._place_expand_button()
@@ -159,9 +159,11 @@ class DashboardPage(QWidget):
         settings = QPushButton("⚙")
         settings.setCursor(Qt.CursorShape.PointingHandCursor)
         settings.setToolTip("设置")
+        t.fixed_w(settings, 20)
+        t.fixed_h(settings, 14)  # 同 _RedButton 14px 高, 中心线对齐
         settings.setStyleSheet(
             f"QPushButton {{ color: {t.color('text_secondary')}; background: transparent; "
-            f"border: none; font-size: {t.scaled(16)}px; }}"
+            f"border: none; font-size: {t.scaled(11)}px; }}"
         )
         close_btn = _RedButton()
         settings.clicked.connect(lambda: self.settingsRequested.emit())
@@ -278,16 +280,32 @@ class DashboardPage(QWidget):
                 f"{value:.1f}" if value is not None else None, "gold"
             )
 
-        temp("cpu_temp", getattr(lhm, "cpu_temp", None))
+        # LHM 优先; 温度缺数时 fallback 现有 hardware.snapshot() (WMI / nvidia-smi)
+        cpu_temp = getattr(lhm, "cpu_temp", None)
+        if cpu_temp is None and cpu is not None:
+            cpu_temp = getattr(cpu, "temp_c", None)
+        temp("cpu_temp", cpu_temp)
         self._chips["cpu_freq"].setValue(
             f"{freq / 1000:.2f}" if freq else None, "text_primary"
         )
-        power("cpu_power", getattr(lhm, "cpu_power", None))
+        power("cpu_power", getattr(lhm, "cpu_power", None))  # 无 fallback
         for i in range(2):
-            temp(f"gpu{i}_hotspot", getattr(lhm, f"gpu{i}_hotspot", None))
+            gpu = gpus[i] if i < len(gpus) else None
+            hotspot = getattr(lhm, f"gpu{i}_hotspot", None)
+            if hotspot is None and gpu is not None:
+                hotspot = getattr(gpu, "temp_c", None)
+            vram_temp = getattr(lhm, f"gpu{i}_vram_temp", None)
+            if vram_temp is None and gpu is not None:
+                vram_temp = getattr(gpu, "vram_temp_c", None)
+            temp(f"gpu{i}_hotspot", hotspot)
             power(f"gpu{i}_power", getattr(lhm, f"gpu{i}_power", None))
-            temp(f"gpu{i}_vram_temp", getattr(lhm, f"gpu{i}_vram_temp", None))
+            temp(f"gpu{i}_vram_temp", vram_temp)
         power("total_power", getattr(lhm, "total_power", None))
+
+        # LHM 诊断原因: 显示 — 的 chip hover 可见 (Franky 可 SSH 读)
+        error = getattr(lhm, "error", None)
+        for chip in self._chips.values():
+            chip.setToolTip(f"LHM 未就绪: {error}" if error and chip._value.text() == "—" else "")
 
         try:
             frp = backend_frp.snapshot()

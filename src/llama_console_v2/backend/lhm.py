@@ -22,6 +22,7 @@ _GPU_GROUPS: list[list] = []
 _LOCK = threading.Lock()
 _CACHE: dict[str, object] = {"snap": None, "ts": 0.0}
 _STARTED = False
+_LAST_ERROR: str | None = None
 
 
 def _empty() -> SimpleNamespace:
@@ -31,21 +32,25 @@ def _empty() -> SimpleNamespace:
         "gpu1_hotspot", "gpu1_power", "gpu1_vram_temp",
         "total_power",
     )
-    return SimpleNamespace(**{n: None for n in names})
+    snap = SimpleNamespace(**{n: None for n in names})
+    snap.error = _LAST_ERROR
+    return snap
 
 
 def _init_computer() -> bool:
     """开启 LHM Computer 一次 (module-level 单例)."""
-    global _COMPUTER, _GPU_GROUPS
+    global _COMPUTER, _GPU_GROUPS, _LAST_ERROR
     if _COMPUTER is not None:
         return True
     if clr is None:
+        _LAST_ERROR = "pythonnet/clr 未安装"
         return False
     import sys
     dll = Path(getattr(sys, "_MEIPASS", "")) / "LibreHardwareMonitorLib.dll"
     if not dll.is_file():
         dll = Path(_DLL)
     if not dll.is_file():
+        _LAST_ERROR = f"DLL 不存在: {dll}"
         return False
     clr.AddReference(str(dll))
     from LibreHardwareMonitor.Hardware import Computer  # type: ignore
@@ -120,6 +125,7 @@ def _collect() -> SimpleNamespace:
 
 
 def _worker() -> None:
+    global _LAST_ERROR
     while True:
         try:
             if _init_computer():
@@ -129,8 +135,8 @@ def _worker() -> None:
                 with _LOCK:
                     _CACHE["snap"] = _collect()
                     _CACHE["ts"] = time.monotonic()
-        except Exception:  # noqa: BLE001 — 单次采样失败唔杀死线程
-            pass
+        except Exception as exc:  # noqa: BLE001 — 单次采样失败唔杀死线程
+            _LAST_ERROR = f"采样失败: {exc}"
         time.sleep(2.0)
 
 
@@ -142,4 +148,7 @@ def lhm_snapshot() -> SimpleNamespace:
         threading.Thread(target=_worker, name="lhm-collector", daemon=True).start()
     with _LOCK:
         snap = _CACHE.get("snap")
-    return snap if snap is not None else _empty()
+    if snap is None:
+        return _empty()
+    snap.error = _LAST_ERROR  # 诊断原因外露畀 dashboard tooltip
+    return snap

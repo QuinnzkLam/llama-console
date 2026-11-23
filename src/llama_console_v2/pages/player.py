@@ -233,10 +233,11 @@ class _RedButton(QPushButton):
 class _ExpandButton(QPushButton):
     """窗口右下角自绘对角双向箭头 (紧凑展开 / 展开收窄)."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, direction: str = "expand") -> None:
         super().__init__(parent)
+        self._collapse = direction == "collapse"
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("展开 / 收窄")
+        self.setToolTip("收窄" if self._collapse else "展开 / 收窄")
         t.fixed_w(self, 28)
         t.fixed_h(self, 28)
         self.setStyleSheet(
@@ -254,12 +255,19 @@ class _ExpandButton(QPushButton):
         p.setPen(pen)
         c = self.rect().center()
         r, head = t.scaled(7), t.scaled(4)
-        # ↖↘ : 左上 → 右下, 两端带箭头
         p.drawLine(c.x() - r, c.y() - r, c.x() + r, c.y() + r)
-        p.drawLine(c.x() + r, c.y() + r, c.x() + r - head, c.y() + r)
-        p.drawLine(c.x() + r, c.y() + r, c.x() + r, c.y() + r - head)
-        p.drawLine(c.x() - r, c.y() - r, c.x() - r + head, c.y() - r)
-        p.drawLine(c.x() - r, c.y() - r, c.x() - r, c.y() - r + head)
+        if self._collapse:
+            # ↘↖ : 箭头指向中心 (收窄语义)
+            p.drawLine(c.x() - head, c.y() - head, c.x(), c.y() - head)
+            p.drawLine(c.x() - head, c.y() - head, c.x() - head, c.y())
+            p.drawLine(c.x() + head, c.y() + head, c.x(), c.y() + head)
+            p.drawLine(c.x() + head, c.y() + head, c.x() + head, c.y())
+        else:
+            # ↖↘ : 箭头指向两端 (展开语义)
+            p.drawLine(c.x() + r, c.y() + r, c.x() + r - head, c.y() + r)
+            p.drawLine(c.x() + r, c.y() + r, c.x() + r, c.y() + r - head)
+            p.drawLine(c.x() - r, c.y() - r, c.x() - r + head, c.y() - r)
+            p.drawLine(c.x() - r, c.y() - r, c.x() - r, c.y() - r + head)
         p.end()
 
 
@@ -299,6 +307,7 @@ class PlayerPage(QWidget):
             self._expand_btn.clicked.connect(self._on_mode_clicked)
             self._place_expand_button()
         self._apply_compact_font()
+        self._reposition_cap()
 
         # Space: 聚焦 combobox 时放行给下拉框 (见 _toggle 的焦点检查)
         self._space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
@@ -335,19 +344,20 @@ class PlayerPage(QWidget):
         lay.setContentsMargins(t.scaled(10), 0, t.scaled(10), 0)
         lay.setSpacing(t.scaled(10))
 
-        # 左: 模型卡 — cap 贴顶, icon+combo 行喺剩余空间垂直居中
+        # 左: 模型卡 — cap 用绝对定位贴 icon 上方, model_row 独立垂直居中
         model_col = QVBoxLayout()
         model_col.setSpacing(t.scaled(4))
-        self._cap = QLabel("模型")
+        self._cap = QLabel("模型", self)  # 唔入 layout: 避免 cap 高度推低 icon 中线
         self._cap.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
+        self._cap.show()
         model_col.addStretch(1)
-        model_col.addWidget(self._cap)
 
         model_row = QHBoxLayout()
         model_row.setSpacing(t.scaled(6))
         model_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         icon_px = t.COMPACT["icon_size"]
         icon = QLabel()
+        self._icon = icon
         t.fixed_w(icon, icon_px)
         t.fixed_h(icon, icon_px)
         # 真 icon: 开发机用 repo assets, onefile 用 PyInstaller 解包目录 (spec datas 已加)
@@ -367,7 +377,11 @@ class PlayerPage(QWidget):
             f"QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; "
             f"border-left: {t.scaled(5, floor=3)}px solid transparent; "
             f"border-right: {t.scaled(5, floor=3)}px solid transparent; "
-            f"border-top: {t.scaled(6, floor=4)}px solid {t.color('text_secondary')}; }}"
+            f"border-top: {t.scaled(6, floor=4)}px solid {t.color('text_secondary')}; }} "
+            f"QComboBox QAbstractItemView {{ background-color: {t.color('input')}; "
+            f"color: {t.color('text_primary')}; border: 1px solid {t.color('border')}; "
+            f"selection-background-color: {t.color('card_hover')}; "
+            f"selection-color: {t.color('text_primary')}; }}"
         )
         self._combo.blockSignals(True)
         self._combo.addItems(backend_llama.list_models())
@@ -481,9 +495,21 @@ class PlayerPage(QWidget):
             btn.move(self.width() - btn.width() - m, self.height() - btn.height() - m)
             btn.raise_()
 
+    def _reposition_cap(self) -> None:
+        """「模型」贴 icon 上方 4px; icon 中线因此与播放键中线一致."""
+        cap = getattr(self, "_cap", None)
+        icon = getattr(self, "_icon", None)
+        if cap is None or icon is None:
+            return
+        pos = icon.mapTo(self, QPoint(0, 0))
+        cap.adjustSize()
+        cap.move(pos.x(), pos.y() - cap.height() - t.scaled(4))
+        cap.raise_()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._place_expand_button()
+        self._reposition_cap()
 
     def _toggle(self) -> None:
         """Space / 播放键: 与 sidebar 共用同一状态源, 不自己调 backend."""
@@ -548,6 +574,7 @@ class PlayerPage(QWidget):
             force = None
         key = _state_key(force or state)
         text, color_key, self._runningish = _STATE_VIEW[key]
+        self._combo.setEnabled(not self._runningish)  # 运行中锁定模型选择
         if key != self._last_key:
             self._last_key = key
             self._dot.setStyleSheet(
@@ -596,14 +623,36 @@ class PlayerPage(QWidget):
         self._no_gpu.setVisible(not gpus)
 
     def _uptime_text(self, state: str, pid) -> str:
-        """优先 process create_time; 进程读不到时回退 GUI 内部计时."""
-        if state == "running" and pid:
+        """llama-server 实际 create_time (最早进程) → GUI 内部计时兜底."""
+        if state == "running":
+            created: list[float] = []
+            pids: list[int] = []
+            if pid:
+                pids.append(int(pid))
             try:
-                sec = int(time.time() - psutil.Process(int(pid)).create_time())
-                return self._fmt_uptime(max(0, sec))
-            except (psutil.NoSuchProcess, psutil.AccessDenied,
-                    psutil.ZombieProcess, ValueError, TypeError):
+                proc = backend_llama._find_process()  # 真 server (避开 launcher stub)
+                if proc is not None:
+                    pids.append(proc.pid)
+            except Exception:  # noqa: BLE001
                 pass
+            for candidate in pids:
+                try:
+                    created.append(psutil.Process(candidate).create_time())
+                except (psutil.NoSuchProcess, psutil.AccessDenied,
+                        psutil.ZombieProcess, ValueError, TypeError):
+                    continue
+            if not created:
+                # 最后兜底: 扫全部 llama*.exe, 攞最早 create_time
+                try:
+                    for p in psutil.process_iter(["pid", "create_time", "name"]):
+                        if backend_llama._LLAMA_PROCESS_PATTERN.match(p.info.get("name") or ""):
+                            ctime = p.info.get("create_time")
+                            if ctime:
+                                created.append(float(ctime))
+                except Exception:  # noqa: BLE001
+                    pass
+            if created:
+                return self._fmt_uptime(max(0, int(time.time() - min(created))))
         if self._runningish and self._start_ts:
             return self._fmt_uptime(max(0, int(time.time() - self._start_ts)))
         return "00:00:00"

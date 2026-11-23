@@ -618,12 +618,12 @@ class MainWindow(QMainWindow):
             ew, eh = self._expanded_scale_base
             t.set_font_scale(t.compute_font_scale(ew, eh) * 0.93)  # 同 __init__ 算法还原
             t.rescale_all_geometries()
-            # 展开高度按 Dashboard 内容自适应 (不再固定 recommended 高度)
-            rw, _rh = t.recommended_window_size()
+            # 宽度全程不变 (同紧凑); 只按 Dashboard 内容拉伸高度
+            rw = t.scaled(t.COMPACT["width"])
             inset = t.scaled(t.COMPACT["frame_margin"]) + t.scaled(t.COMPACT["border_width"], floor=1)
             screen = QApplication.primaryScreen()
             avail_h = screen.availableGeometry().height() if screen is not None else rw
-            h = min(max(self._dashboard_page.sizeHint().height() + inset * 2, 500), avail_h)
+            h = min(max(self._dashboard_page.sizeHint().height() + inset * 2, 240), avail_h)
             target = (rw, h)
         self._player_page.set_compact_mode(compact)
         self._morph_to(target[0], target[1], was_visible)
