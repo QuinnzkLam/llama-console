@@ -337,16 +337,10 @@ RING = {
     "span_deg": 270,
 }
 
-# 展开模式单页 Dashboard (Option A) — 卡与放大版播放器尺寸
+# 展开模式单页 Dashboard (Option A) — 播放器元素尺寸两模式统一用 COMPACT
 DASH = {
     "radius":         14,
     "margin":         20,
-    "combo_height":   60,   # t.scaled 后 ≈48px (展开 scale ~0.8)
-    "icon_size":      60,
-    "play_diameter":  110,  # ≈88px
-    "uptime_px":      38,   # ≈30px
-    "combo_main_px":  16,
-    "combo_sub_px":   12,
     "title_px":       15,
     "body_px":        12,
     "muted_px":       10,

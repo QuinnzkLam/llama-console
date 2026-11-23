@@ -240,9 +240,9 @@ class _ExpandButton(QPushButton):
         t.fixed_w(self, 28)
         t.fixed_h(self, 28)
         self.setStyleSheet(
-            f"QPushButton {{ background-color: {t.color('card_hover')}; "
-            f"border: 1px solid {t.color('border')}; "
-            f"border-radius: {t.scaled(6)}px; }}"
+            f"QPushButton {{ background: transparent; border: none; "
+            f"border-radius: {t.scaled(6)}px; }} "
+            f"QPushButton:hover {{ background-color: {t.color('card_hover')}; }}"
         )
 
     def paintEvent(self, event) -> None:
@@ -340,13 +340,13 @@ class PlayerPage(QWidget):
         model_col.setSpacing(t.scaled(4))
         self._cap = QLabel("模型")
         self._cap.setStyleSheet(f"color: {t.color('text_muted')}; background: transparent;")
-        model_col.addWidget(self._cap)
         model_col.addStretch(1)
+        model_col.addWidget(self._cap)
 
         model_row = QHBoxLayout()
         model_row.setSpacing(t.scaled(6))
         model_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        icon_px = t.DASH["icon_size"] if self._embedded else t.COMPACT["icon_size"]
+        icon_px = t.COMPACT["icon_size"]
         icon = QLabel()
         t.fixed_w(icon, icon_px)
         t.fixed_h(icon, icon_px)
@@ -358,9 +358,7 @@ class PlayerPage(QWidget):
 
         self._combo = _SubtitleCombo()
         self._combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        t.fixed_h(self._combo, t.DASH["combo_height"] if self._embedded else 44)
-        if self._embedded:
-            self._combo.setSubPixel(t.DASH["combo_sub_px"])
+        t.fixed_h(self._combo, 44)
         self._combo.setStyleSheet(
             f"QComboBox {{ background-color: {t.color('input')}; color: {t.color('text_primary')}; "
             f"border: 1px solid {t.color('border')}; border-radius: {t.radius('md')}px; "
@@ -391,9 +389,7 @@ class PlayerPage(QWidget):
         # 中: 播放键 + 状态
         action = QHBoxLayout()
         action.setSpacing(t.scaled(8))
-        self._play = _PlayButton(
-            diameter=t.DASH["play_diameter"] if self._embedded else None
-        )
+        self._play = _PlayButton()
         self._play.clicked.connect(self._toggle)
         action.addWidget(self._play, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -451,16 +447,16 @@ class PlayerPage(QWidget):
     # ---------------- 交互 ----------------
     def _apply_compact_font(self) -> None:
         """按当前 font_scale 以像素字号重设全部文字, 避免展开 scale 固化到 QLabel."""
-        specs = [(self._cap, t.DASH["muted_px"] if self._embedded else 14, True)]
-        if not self._embedded:
-            specs.insert(0, (self._title, 15, True))
-        specs += [
-            (self._combo, t.DASH["combo_main_px"] if self._embedded else 13, True),
+        specs = [
+            (self._cap, 14, True),
+            (self._combo, 13, True),
             (self._dot, 11, False),
             (self._status_text, 11, False),
-            (self._up_label, t.DASH["muted_px"] if self._embedded else 13, True),
-            (self._uptime, t.DASH["uptime_px"] if self._embedded else 24, True),
+            (self._up_label, 13, True),
+            (self._uptime, 24, True),
         ]
+        if not self._embedded:
+            specs.insert(0, (self._title, 15, True))  # embedded 无顶栏
         for widget, px, bold in specs:
             font = QFont()
             font.setPixelSize(t.scaled(px))

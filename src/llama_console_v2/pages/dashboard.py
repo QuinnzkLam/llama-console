@@ -13,7 +13,7 @@ from llama_console_v2.backend import frp as backend_frp
 from llama_console_v2.backend import hardware as backend_hw
 from llama_console_v2.backend import lhm as backend_lhm
 from llama_console_v2.backend import llama_cpp as backend_llama
-from llama_console_v2.pages.player import PlayerPage, _RedButton
+from llama_console_v2.pages.player import PlayerPage, _ExpandButton, _RedButton
 from llama_console_v2.widgets.ring_gauge import RingGauge
 
 
@@ -32,7 +32,7 @@ def _divider() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.Shape.HLine)
     line.setStyleSheet(f"color: {t.DASH['divider']}; background-color: {t.DASH['divider']}; border: none;")
-    line.setFixedHeight(max(1, t.scaled(1, floor=1)))
+    line.setFixedHeight(max(1, t.scaled(2, floor=1)))
     return line
 
 
@@ -126,6 +126,12 @@ class DashboardPage(QWidget):
         root.addLayout(self._build_info_row())
         root.addStretch(1)
 
+        # 展开模式收窄入口: 右下角同款双向箭头按钮
+        self._expand_btn = _ExpandButton(self)
+        self._expand_btn.setToolTip("收窄")
+        self._expand_btn.clicked.connect(lambda: self.compactRequested.emit(True))
+        self._place_expand_button()
+
         self._poll = QTimer(self)
         self._poll.setInterval(2000)
         self._poll.timeout.connect(self._refresh)
@@ -133,28 +139,35 @@ class DashboardPage(QWidget):
         self._refresh()
 
     # ---------------- 构建 ----------------
+    def _place_expand_button(self) -> None:
+        btn = self._expand_btn
+        m = t.scaled(8)
+        btn.move(self.width() - btn.width() - m, self.height() - btn.height() - m)
+        btn.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place_expand_button()
+
     def _build_top_bar(self) -> QHBoxLayout:
         lay = QHBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(t.scaled(8))
-        lay.addWidget(_lbl("LlamaDeck", t.DASH["title_px"], True))
+        lay.setSpacing(t.scaled(12))
+        title = _lbl("LlamaDeck", t.DASH["title_px"], True)
+        lay.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addStretch(1)
-        collapse = QPushButton("⤡")
         settings = QPushButton("⚙")
+        settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings.setToolTip("设置")
+        settings.setStyleSheet(
+            f"QPushButton {{ color: {t.color('text_secondary')}; background: transparent; "
+            f"border: none; font-size: {t.scaled(16)}px; }}"
+        )
         close_btn = _RedButton()
-        for btn, tip in ((collapse, "收窄"), (settings, "设置")):
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(tip)
-            btn.setStyleSheet(
-                f"QPushButton {{ color: {t.color('text_secondary')}; background: transparent; "
-                f"border: none; font-size: {t.scaled(16)}px; }}"
-            )
-        collapse.clicked.connect(lambda: self.compactRequested.emit(True))
         settings.clicked.connect(lambda: self.settingsRequested.emit())
         close_btn.clicked.connect(lambda: self.closeRequested.emit())
-        lay.addWidget(collapse)
-        lay.addWidget(settings)
-        lay.addWidget(close_btn)
+        lay.addWidget(settings, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         return lay
 
     def _build_gauges(self) -> QHBoxLayout:
