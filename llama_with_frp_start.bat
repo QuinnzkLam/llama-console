@@ -16,5 +16,5 @@ cd /d D:\llama-console
 call start_llama.bat
 
 
-REM 3) Open NLM GUI (visible when user desktop session active)
-start "" /b D:\llama-console\dist\NLM.exe
+REM 3) Open LlamaDeck GUI (visible when user desktop session active)
+start "" /b D:\llama-console\dist\LlamaDeck.exe
