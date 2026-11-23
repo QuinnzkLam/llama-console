@@ -74,7 +74,7 @@ def _debug_screenshot(window) -> None:
         target = Path(r"D:\llama-console\logs\debug_screenshot.png")
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name("debug_screenshot.png.tmp")
-        if window.grab().save(str(tmp)):
+        if window.grab().save(str(tmp), "PNG"):  # .tmp 副檔名 Qt 認唔出, 必須指明格式
             os.replace(tmp, target)
     except Exception:  # noqa: BLE001 — 截图失败绝不影响 GUI
         pass
