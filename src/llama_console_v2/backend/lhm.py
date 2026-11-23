@@ -77,7 +77,7 @@ def _walk(hw):
 def _find(sensors, needles: tuple[str, ...], sensor_type: str | None = None):
     for s in sensors:
         name = (getattr(s, "Name", "") or "").lower()
-        ident = (getattr(s, "Identifier", "") or "").lower()
+        ident = str(getattr(s, "Identifier", "") or "").lower()
         if sensor_type and sensor_type not in str(getattr(s, "SensorType", "")).lower():
             continue
         if any(n in name or n in ident for n in needles):
