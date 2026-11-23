@@ -253,6 +253,8 @@ class MainWindow(QMainWindow):
         self._player_page.compactRequested.connect(self.set_compact)
         self._player_page.closeRequested.connect(self.close)
         self._player_page.borderColorChanged.connect(self._compact_frame.set_border_color)
+        self._player_page.borderColorChanged.connect(self._dashboard_frame.set_border_color)
+        self._dashboard_page.borderColorChanged.connect(self._dashboard_frame.set_border_color)
         self._dashboard_page.compactRequested.connect(self.set_compact)
         self._dashboard_page.closeRequested.connect(self.close)
         self._dashboard_page.settingsRequested.connect(self._open_settings)

@@ -92,6 +92,7 @@ class DashboardPage(QWidget):
     compactRequested = Signal(bool)
     closeRequested = Signal()
     settingsRequested = Signal()
+    borderColorChanged = Signal(str)
     startRequested = Signal()
     stopRequested = Signal()
 
