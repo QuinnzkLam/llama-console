@@ -1,7 +1,6 @@
-"""DashboardPage - 展开模式单页 Dashboard (Quinn 确认 Option A).
+"""DashboardPage - 展开模式单页 Dashboard (Option A, FINAL-v4 seamless).
 
-上至下: 播放器卡 (内嵌 PlayerPage) / 6 环行 / FRP+Token 双卡 / 硬件详情行.
-所有数据直接来自 backend, 不经 ConsolePage widget.
+无大卡框: 各区块直接放 page 上, 区间用分隔线. 硬件矩阵用 stat chip (LHM 数据).
 """
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont
@@ -12,8 +11,9 @@ from PySide6.QtWidgets import (
 from llama_console_v2 import theme as t
 from llama_console_v2.backend import frp as backend_frp
 from llama_console_v2.backend import hardware as backend_hw
+from llama_console_v2.backend import lhm as backend_lhm
 from llama_console_v2.backend import llama_cpp as backend_llama
-from llama_console_v2.pages.player import PlayerPage
+from llama_console_v2.pages.player import PlayerPage, _RedButton
 from llama_console_v2.widgets.ring_gauge import RingGauge
 
 
@@ -28,14 +28,62 @@ def _lbl(text: str, px: int, bold: bool = False,
     return lab
 
 
-def _card() -> QFrame:
-    card = QFrame()
-    card.setStyleSheet(
-        f"QFrame {{ background-color: {t.color('card')}; "
-        f"border: 1px solid {t.color('border')}; "
-        f"border-radius: {t.scaled(t.DASH['radius'])}px; }}"
-    )
-    return card
+def _divider() -> QFrame:
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setStyleSheet(f"color: {t.DASH['divider']}; background-color: {t.DASH['divider']}; border: none;")
+    line.setFixedHeight(max(1, t.scaled(1, floor=1)))
+    return line
+
+
+def _temp_color(value: float | None) -> str:
+    if value is None:
+        return "text_muted"
+    if value < 60:
+        return "success"
+    if value <= 75:
+        return "warning"
+    return "danger"
+
+
+class _StatChip(QFrame):
+    """色点 + 名称 + 大值 + 单位; 温度按阈值着色, 功率用金色."""
+
+    def __init__(self, name: str, unit: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatChip")
+        self._dot = _lbl("●", 10, True, "text_muted")
+        self._name = _lbl(name, t.DASH["muted_px"], color="text_muted")
+        self._value = _lbl("—", 16, True)
+        self._unit = _lbl(unit, t.DASH["muted_px"], color="text_muted")
+        value_row = QHBoxLayout()
+        value_row.setContentsMargins(0, 0, 0, 0)
+        value_row.setSpacing(t.scaled(3))
+        value_row.addWidget(self._value)
+        value_row.addWidget(self._unit)
+        value_row.addStretch(1)
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        col.addWidget(self._name)
+        col.addLayout(value_row)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(t.scaled(10), t.scaled(6), t.scaled(10), t.scaled(6))
+        row.setSpacing(t.scaled(6))
+        row.addWidget(self._dot)
+        row.addLayout(col, 1)
+        self.setValue(None, "text_muted")
+
+    def setValue(self, text: str | None, color_key: str) -> None:
+        color_hex = t.DASH["gold"] if color_key == "gold" else t.color(color_key)
+        self._value.setText(text or "—")
+        self._value.setStyleSheet(f"color: {color_hex}; background: transparent; border: none;")
+        self._dot.setStyleSheet(f"color: {color_hex}; background: transparent; border: none;")
+        self.setStyleSheet(
+            f"QFrame#StatChip {{ background-color: {t.DASH['card2']}; "
+            f"border: 1px solid {color_hex}; "
+            f"border-radius: {t.scaled(t.DASH['chip_radius'])}px; }}"
+        )
 
 
 class DashboardPage(QWidget):
@@ -50,17 +98,32 @@ class DashboardPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("DashboardPage")
-        self.setStyleSheet(f"background-color: {t.color('bg')};")
+        self.setStyleSheet("background: transparent;")
 
         root = QVBoxLayout(self)
         m = t.scaled(t.DASH["margin"])
-        root.setContentsMargins(m, t.scaled(12), m, m)
+        root.setContentsMargins(m, t.scaled(10), m, m)
         root.setSpacing(t.scaled(t.DASH["card_gap"]))
         root.addLayout(self._build_top_bar())
-        root.addWidget(self._build_player_card(), 1)
-        root.addWidget(self._build_gauge_card())
+        root.addWidget(_divider())
+
+        # b. 播放器区 (无框)
+        self._player = PlayerPage(embedded=True)
+        self._player.startRequested.connect(self.startRequested)
+        self._player.stopRequested.connect(self.stopRequested)
+        root.addWidget(self._player, 1)
+        root.addWidget(_divider())
+
+        # c. 6 环行 (无框)
+        root.addLayout(self._build_gauges())
+        root.addWidget(_divider())
+
+        # d. 硬件矩阵
+        root.addLayout(self._build_hardware_matrix())
+        root.addWidget(_divider())
+
+        # e. FRP + Token 无框双栏
         root.addLayout(self._build_info_row())
-        root.addWidget(self._build_hardware_card())
         root.addStretch(1)
 
         self._poll = QTimer(self)
@@ -76,25 +139,16 @@ class DashboardPage(QWidget):
         lay.setSpacing(t.scaled(8))
         lay.addWidget(_lbl("LlamaDeck", t.DASH["title_px"], True))
         lay.addStretch(1)
-
-        # 展开模式入口: 收窄 / 设置 / 关闭
         collapse = QPushButton("⤡")
         settings = QPushButton("⚙")
-        close_btn = QPushButton()
-        for btn, tip in ((collapse, "收窄"), (settings, "设置"), (close_btn, "关闭")):
+        close_btn = _RedButton()
+        for btn, tip in ((collapse, "收窄"), (settings, "设置")):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tip)
-        for btn in (collapse, settings):
             btn.setStyleSheet(
                 f"QPushButton {{ color: {t.color('text_secondary')}; background: transparent; "
                 f"border: none; font-size: {t.scaled(16)}px; }}"
             )
-        t.fixed_w(close_btn, 12)
-        t.fixed_h(close_btn, 12)
-        close_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {t.color('traffic_red')}; border: none; "
-            f"border-radius: {t.scaled(6)}px; }}"
-        )
         collapse.clicked.connect(lambda: self.compactRequested.emit(True))
         settings.clicked.connect(lambda: self.settingsRequested.emit())
         close_btn.clicked.connect(lambda: self.closeRequested.emit())
@@ -103,88 +157,72 @@ class DashboardPage(QWidget):
         lay.addWidget(close_btn)
         return lay
 
-    def _build_player_card(self) -> QFrame:
-        self._player_card = _card()
-        lay = QVBoxLayout(self._player_card)
-        m = t.scaled(t.DASH["margin"])
-        lay.setContentsMargins(m, t.scaled(14), m, t.scaled(14))
-        self._player = PlayerPage(embedded=True)
-        self._player.startRequested.connect(self.startRequested)
-        self._player.stopRequested.connect(self.stopRequested)
-        self._player.borderColorChanged.connect(self._set_player_border)
-        lay.addWidget(self._player, 1)
-        self._set_player_border(self._player.border_color())
-        return self._player_card
-
-    def _set_player_border(self, color_hex: str) -> None:
-        self._player_card.setStyleSheet(
-            f"QFrame {{ background-color: {t.color('card')}; "
-            f"border: {t.scaled(t.COMPACT['border_width'], floor=1)}px solid {color_hex}; "
-            f"border-radius: {t.scaled(t.DASH['radius'])}px; }}"
-        )
-
-    def _build_gauge_card(self) -> QFrame:
-        card = _card()
-        lay = QHBoxLayout(card)
-        m = t.scaled(t.DASH["margin"])
-        lay.setContentsMargins(m, t.scaled(14), m, t.scaled(14))
+    def _build_gauges(self) -> QHBoxLayout:
+        lay = QHBoxLayout()
+        lay.setContentsMargins(0, t.scaled(6), 0, t.scaled(6))
         lay.setSpacing(t.scaled(8))
         self._gauges: list[RingGauge] = []
         for label in ("CPU", "内存", "GPU0·核心", "GPU0·显存", "GPU1·核心", "GPU1·显存"):
             gauge = RingGauge(label)
             self._gauges.append(gauge)
             lay.addWidget(gauge, 1)
-        return card
+        return lay
+
+    def _build_hardware_matrix(self) -> QVBoxLayout:
+        root = QVBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(t.scaled(6))
+        root.addWidget(_lbl("硬件状态", t.DASH["title_px"], True))
+        self._chips: dict[str, _StatChip] = {}
+        rows = (
+            (("cpu_temp", "CPU 温度", "°C", "temp"),
+             ("cpu_freq", "CPU 频率", "GHz", "plain"),
+             ("cpu_power", "CPU 功率", "W", "power")),
+            (("gpu0_hotspot", "GPU0 核心温度", "°C", "temp"),
+             ("gpu0_power", "GPU0 功率", "W", "power"),
+             ("gpu0_vram_temp", "GPU0 显存温度", "°C", "temp")),
+            (("gpu1_hotspot", "GPU1 核心温度", "°C", "temp"),
+             ("gpu1_power", "GPU1 功率", "W", "power"),
+             ("gpu1_vram_temp", "GPU1 显存温度", "°C", "temp")),
+            (("total_power", "整机功耗", "W", "power"),),
+        )
+        for specs in rows:
+            row = QHBoxLayout()
+            row.setSpacing(t.scaled(6))
+            for key, name, unit, _kind in specs:
+                chip = _StatChip(name, unit)
+                self._chips[key] = chip
+                row.addWidget(chip, 1)
+            root.addLayout(row)
+        return root
 
     def _build_info_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.setSpacing(t.scaled(t.DASH["card_gap"]))
-
-        frp_card = _card()
-        fl = QVBoxLayout(frp_card)
-        fl.setContentsMargins(t.scaled(16), t.scaled(12), t.scaled(16), t.scaled(12))
-        fl.setSpacing(t.scaled(4))
+        row.setSpacing(t.scaled(t.DASH["margin"]))
+        # FRP
+        frp_col = QVBoxLayout()
+        frp_col.setSpacing(t.scaled(4))
         head = QHBoxLayout()
         head.addWidget(_lbl("FRP 隧道", t.DASH["title_px"], True))
         self._frp_dot = _lbl("●", t.DASH["body_px"], True, "text_muted")
         head.addWidget(self._frp_dot)
         head.addStretch(1)
-        fl.addLayout(head)
+        frp_col.addLayout(head)
         self._frp_lines = [_lbl("—", t.DASH["body_px"], color="text_secondary") for _ in range(4)]
         for line in self._frp_lines:
-            fl.addWidget(line)
-        row.addWidget(frp_card, 1)
-
-        tok_card = _card()
-        tl = QVBoxLayout(tok_card)
-        tl.setContentsMargins(t.scaled(16), t.scaled(12), t.scaled(16), t.scaled(12))
-        tl.setSpacing(t.scaled(4))
-        tl.addWidget(_lbl("Token 統計", t.DASH["title_px"], True))
+            frp_col.addWidget(line)
+        row.addLayout(frp_col, 1)
+        # Token
+        tok_col = QVBoxLayout()
+        tok_col.setSpacing(t.scaled(4))
+        tok_col.addWidget(_lbl("Token 統計", t.DASH["title_px"], True))
         self._tok_line = _lbl("— tokens", t.DASH["body_px"], color="text_secondary")
         self._tok_total = _lbl("0", 22, True)
         self._tok_rate = _lbl("—", t.DASH["muted_px"], color="text_muted")
-        tl.addWidget(self._tok_line)
-        tl.addWidget(self._tok_total)
-        tl.addWidget(self._tok_rate)
-        row.addWidget(tok_card, 1)
+        for w in (self._tok_line, self._tok_total, self._tok_rate):
+            tok_col.addWidget(w)
+        row.addLayout(tok_col, 1)
         return row
-
-    def _build_hardware_card(self) -> QFrame:
-        card = _card()
-        lay = QHBoxLayout(card)
-        m = t.scaled(t.DASH["margin"])
-        lay.setContentsMargins(m, t.scaled(14), m, t.scaled(14))
-        lay.setSpacing(t.scaled(8))
-        self._hw_values: list[QLabel] = []
-        for name in ("CPU 溫度", "CPU 頻率", "RAM", "GPU0 溫度", "GPU1 溫度", "風扇"):
-            col = QVBoxLayout()
-            col.setSpacing(t.scaled(4))
-            col.addWidget(_lbl(name, t.DASH["muted_px"], color="text_muted"))
-            val = _lbl("—", 16, True)
-            col.addWidget(val)
-            self._hw_values.append(val)
-            lay.addLayout(col, 1)
-        return card
 
     # ---------------- 刷新 ----------------
     def _refresh(self) -> None:
@@ -213,18 +251,30 @@ class DashboardPage(QWidget):
         for i, gauge in enumerate(self._gauges[2:]):
             gauge.setVisible(i // 2 < len(gpus))
 
-        temps = [f"{int(getattr(g, 'temp_c', 0) or 0)}°C" if i < len(gpus) else "—"
-                 for i, g in enumerate(gpus)]
-        vals = [
-            f"{int(getattr(cpu, 'temp_c', 0) or 0)}°C" if cpu and getattr(cpu, "temp_c", None) else "—",
-            f"{getattr(cpu, 'freq_mhz', 0) or 0} MHz" if cpu and getattr(cpu, "freq_mhz", 0) else "—",
-            f"{used:.1f} / {cap:.0f} GB",
-            temps[0] if len(temps) > 0 else "—",
-            temps[1] if len(temps) > 1 else "—",
-            "—",
-        ]
-        for lab, val in zip(self._hw_values, vals):
-            lab.setText(val)
+        # LHM 硬件矩阵 (NULL 显示 —); CPU 频率沿用 PDH freq_mhz
+        lhm = backend_lhm.lhm_snapshot()  # 无 LHM 时全部字段 None, 不 throw
+        freq = getattr(cpu, "freq_mhz", 0) if cpu else 0
+
+        def temp(key: str, value) -> None:
+            self._chips[key].setValue(
+                f"{value:.0f}" if value is not None else None, _temp_color(value)
+            )
+
+        def power(key: str, value) -> None:
+            self._chips[key].setValue(
+                f"{value:.1f}" if value is not None else None, "gold"
+            )
+
+        temp("cpu_temp", getattr(lhm, "cpu_temp", None))
+        self._chips["cpu_freq"].setValue(
+            f"{freq / 1000:.2f}" if freq else None, "text_primary"
+        )
+        power("cpu_power", getattr(lhm, "cpu_power", None))
+        for i in range(2):
+            temp(f"gpu{i}_hotspot", getattr(lhm, f"gpu{i}_hotspot", None))
+            power(f"gpu{i}_power", getattr(lhm, f"gpu{i}_power", None))
+            temp(f"gpu{i}_vram_temp", getattr(lhm, f"gpu{i}_vram_temp", None))
+        power("total_power", getattr(lhm, "total_power", None))
 
         try:
             frp = backend_frp.snapshot()

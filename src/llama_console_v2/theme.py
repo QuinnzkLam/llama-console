@@ -352,4 +352,8 @@ DASH = {
     "muted_px":       10,
     "card_gap":       12,
     "topbar_height":  44,
+    "card2":          "#151b24",   # stat chip 底
+    "divider":        "#1e242e",   # 区块分隔线
+    "gold":           "#eab308",   # 功率数值强调
+    "chip_radius":    8,
 }

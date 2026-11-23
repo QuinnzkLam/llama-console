@@ -210,6 +210,26 @@ class _SubtitleCombo(QComboBox):
         p.end()
 
 
+class _RedButton(QPushButton):
+    """QPainter 自绘正圆关闭灯 (stylesheet border-radius 喺细 widget 上会渲染成方)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        t.fixed_w(self, 14)
+        t.fixed_h(self, 14)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("关闭")
+        self.setStyleSheet("QPushButton { background: transparent; border: none; }")
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(t.color("traffic_red")))
+        p.drawEllipse(QRectF(0, 0, self.width(), self.height()))
+        p.end()
+
+
 class _ExpandButton(QPushButton):
     """窗口右下角自绘对角双向箭头 (紧凑展开 / 展开收窄)."""
 
@@ -234,11 +254,12 @@ class _ExpandButton(QPushButton):
         p.setPen(pen)
         c = self.rect().center()
         r, head = t.scaled(7), t.scaled(4)
-        p.drawLine(c.x() - r, c.y() + r, c.x() + r, c.y() - r)
-        p.drawLine(c.x() + r, c.y() - r, c.x() + r - head, c.y() - r)
-        p.drawLine(c.x() + r, c.y() - r, c.x() + r, c.y() - r + head)
-        p.drawLine(c.x() - r, c.y() + r, c.x() - r + head, c.y() + r)
-        p.drawLine(c.x() - r, c.y() + r, c.x() - r, c.y() + r - head)
+        # ↖↘ : 左上 → 右下, 两端带箭头
+        p.drawLine(c.x() - r, c.y() - r, c.x() + r, c.y() + r)
+        p.drawLine(c.x() + r, c.y() + r, c.x() + r - head, c.y() + r)
+        p.drawLine(c.x() + r, c.y() + r, c.x() + r, c.y() + r - head)
+        p.drawLine(c.x() - r, c.y() - r, c.x() - r + head, c.y() - r)
+        p.drawLine(c.x() - r, c.y() - r, c.x() - r, c.y() - r + head)
         p.end()
 
 
@@ -304,16 +325,8 @@ class PlayerPage(QWidget):
 
         lay.addStretch(1)
 
-        # 净剩红灯 (关闭) — 顶栏最右; 展开入口改右下角 _ExpandButton
-        self._red_btn = QPushButton()
-        t.fixed_w(self._red_btn, 12)
-        t.fixed_h(self._red_btn, 12)
-        self._red_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._red_btn.setToolTip("关闭")
-        self._red_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {t.color('traffic_red')}; border: none; "
-            f"border-radius: {t.scaled(6)}px; }}"
-        )
+        # 净剩红灯 (QPainter 正圆) — 顶栏最右; 展开入口改右下角 _ExpandButton
+        self._red_btn = _RedButton()
         self._red_btn.clicked.connect(lambda: self.closeRequested.emit())
         lay.addWidget(self._red_btn)
 
@@ -438,14 +451,14 @@ class PlayerPage(QWidget):
     # ---------------- 交互 ----------------
     def _apply_compact_font(self) -> None:
         """按当前 font_scale 以像素字号重设全部文字, 避免展开 scale 固化到 QLabel."""
-        specs = [(self._cap, t.DASH["muted_px"] if self._embedded else 10, False)]
+        specs = [(self._cap, t.DASH["muted_px"] if self._embedded else 14, True)]
         if not self._embedded:
             specs.insert(0, (self._title, 15, True))
         specs += [
             (self._combo, t.DASH["combo_main_px"] if self._embedded else 13, True),
             (self._dot, 11, False),
             (self._status_text, 11, False),
-            (self._up_label, t.DASH["muted_px"] if self._embedded else 10, False),
+            (self._up_label, t.DASH["muted_px"] if self._embedded else 13, True),
             (self._uptime, t.DASH["uptime_px"] if self._embedded else 24, True),
         ]
         for widget, px, bold in specs:

@@ -11,7 +11,7 @@ Quinn 09:30 (第四轮): resize 性能优化
 - scale 阈值 0.02 → 0.05 (减少不必要 rescale)
 - _rescale_fonts 用 QTimer.singleShot 延迟, 避免阻塞 UI
 """
-from PySide6.QtCore import Qt, QRect, QSettings, QSize, QTimer
+from PySide6.QtCore import Qt, QEasingCurve, QPropertyAnimation, QRect, QSettings, QSize, QTimer
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -133,6 +133,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("LlamaDeck")
         self._normal_flags = self.windowFlags()
+        # 两模式都 frameless + translucent: 白系统标题栏由自绘顶栏取代
+        self.setWindowFlags(self._normal_flags | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
 
         # 窗口大小：双模式均固定不可拖拽调节 (R12 18:10 用户要求)
         #   - 紧凑模式: set_compact(True) 固定为 t.scaled(980 x 280)
@@ -159,7 +163,6 @@ class MainWindow(QMainWindow):
         self._expanded_scale_base = (win_w, win_h)
         t.set_font_scale(t.compute_font_scale(win_w, win_h) * 0.93)
         self.resize(win_w, win_h)
-        self.setStyleSheet(f"background-color: {t.color('bg')};")
 
         # Central widget
         central = QWidget()
@@ -227,9 +230,22 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._compact_frame, 1)
 
         # 展开模式: 单页 Dashboard (旧 sidebar + stack 保留作状态机回调, 不再显示)
+        # 与 compact 同样用自绘圆角框 + 光晕, 保持 frameless 视觉一致
         self._dashboard_page = DashboardPage()
-        root_layout.addWidget(self._dashboard_page, 1)
-        self._dashboard_page.hide()
+        self._dashboard_frame = _CompactFrame()
+        self._dashboard_frame.set_border_color(t.color("border"))
+        dash_shadow = QGraphicsDropShadowEffect(self._dashboard_frame)
+        dash_shadow.setBlurRadius(t.scaled(t.COMPACT["shadow_blur"]))
+        dash_shadow.setColor(QColor(t.color("border")))
+        dash_shadow.setOffset(0, 0)
+        self._dashboard_frame.setGraphicsEffect(dash_shadow)
+        self._dash_frame_layout = QVBoxLayout(self._dashboard_frame)
+        inset = t.scaled(t.COMPACT["frame_margin"]) + t.scaled(t.COMPACT["border_width"], floor=1)
+        self._dash_frame_layout.setContentsMargins(inset, inset, inset, inset)
+        self._dash_frame_layout.setSpacing(0)
+        self._dash_frame_layout.addWidget(self._dashboard_page)
+        root_layout.addWidget(self._dashboard_frame, 1)
+        self._dashboard_frame.hide()
 
         # 播放键 / Space 与 sidebar 共用同一组 start/stop 回调
         self._player_page.startRequested.connect(self._on_sidebar_start)
@@ -555,8 +571,27 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self)
         dlg.exec()
 
+    def _morph_to(self, w: int, h: int, animate: bool) -> None:
+        """180ms OutCubic geometry morph; 完结后先至锁定固定尺寸."""
+        self.setMinimumSize(QSize(0, 0))
+        self.setMaximumSize(QSize(16_777_215, 16_777_215))
+        if not animate:
+            self.resize(w, h)
+            self.setFixedSize(w, h)
+            return
+        anim = QPropertyAnimation(self, b"geometry")
+        anim.setDuration(180)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        end = self.geometry()
+        end.setWidth(w)
+        end.setHeight(h)
+        anim.setEndValue(end)
+        anim.finished.connect(lambda: self.setFixedSize(w, h))
+        self._morph_anim = anim  # 保住 reference, 免被 GC
+        anim.start()
+
     def set_compact(self, compact: bool) -> None:
-        """紧凑 frameless 播放器 ↔ 展开单页 Dashboard."""
+        """紧凑 frameless 播放器 ↔ 展开 frameless 单页 Dashboard."""
         if self._compact == compact:
             return
         was_visible = self.isVisible()
@@ -570,32 +605,22 @@ class MainWindow(QMainWindow):
             if self._stack.parent() is not self._compact_frame:
                 self._body_layout.removeWidget(self._stack)
                 self._frame_layout.addWidget(self._stack, 1)
-            self._dashboard_page.hide()
+            self._dashboard_frame.hide()
             self._body.hide()
             self._error_banner.hide()
             self._compact_frame.show()
             self._stack.setCurrentIndex(2)
-            self.setWindowFlags(self._normal_flags | Qt.WindowType.FramelessWindowHint)
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-            self.setStyleSheet("background: transparent;")
-            self.setFixedSize(t.scaled(t.COMPACT["width"]), t.scaled(t.COMPACT["height"]))
+            target = (t.scaled(t.COMPACT["width"]), t.scaled(t.COMPACT["height"]))
         else:
-            # Option A: 展开显示单页 Dashboard; sidebar + stack 唔再显示
             self._compact_frame.hide()
             self._body.hide()
-            self._dashboard_page.show()
-            self.setWindowFlags(self._normal_flags)
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-            self.setStyleSheet(f"background-color: {t.color('bg')};")
-            self.setMinimumSize(QSize(0, 0))
-            self.setMaximumSize(QSize(16_777_215, 16_777_215))
+            self._dashboard_frame.show()
             ew, eh = self._expanded_scale_base
             t.set_font_scale(t.compute_font_scale(ew, eh) * 0.93)  # 同 __init__ 算法还原
             t.rescale_all_geometries()
-            w, h = t.recommended_window_size()
-            self.resize(w, h)
-            self.setFixedSize(w, h)  # R12: 展开模式同样禁用拖拽调节
+            target = t.recommended_window_size()
         self._player_page.set_compact_mode(compact)
+        self._morph_to(target[0], target[1], was_visible)
         if was_visible:
             self.show()
 
@@ -613,6 +638,10 @@ class MainWindow(QMainWindow):
         3) rescale 用 QTimer.singleShot, 不阻塞 paint
         """
         super().resizeEvent(event)
+        # 动画期间唔好重算字体 (中间 geometry 唔代表最终尺寸)
+        anim = getattr(self, "_morph_anim", None)
+        if anim is not None and anim.state() == QPropertyAnimation.State.Running:
+            return
         # 初始化 resize 尚未 show() 时跳过, 保留 app.py 设定并经 0.93 收紧的字体缩放
         if not getattr(self, "_rescale_ready", False):
             return

@@ -7,7 +7,7 @@
 # scripts\dist\ instead of the repo-root dist\ (where it must stay).
 import sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_all
 
 block_cipher = None
 
@@ -39,6 +39,10 @@ hidden += ['app', 'theme', 'main_window', 'backend',
 # Worker 2026-08-28 17:33 GMT+8 fix (v6 -> v7): bundle pywin32 so hardware.py can use
 # win32com.client (WMI CPU model) and win32pdh (live CPU MHz / RAM perf counters)
 # instead of falling back to "unknown" when pywin32 is missing from frozen exe.
+# pythonnet (LHM PoC) — collect_all 最稳: 埋 clr_loader / pythonnet runtime 全部 datas/binaries
+_pn_datas, _pn_binaries, _pn_hidden = collect_all('pythonnet')
+hidden += _pn_hidden
+
 hidden += ['win32com', 'win32com.client', 'win32pdh', 'pywintypes', 'pythoncom',
            'win32api', 'win32process', 'win32security', 'win32clipboard',
            'win32com.server', 'win32com.shell', 'win32com.adsi',
@@ -52,9 +56,10 @@ hidden += ['win32com', 'win32com.client', 'win32pdh', 'pywintypes', 'pythoncom',
 a = Analysis(
     [str(v2_root / '__main__.py')],
     pathex=[str(v2_parent)],
-    binaries=[],
+    binaries=_pn_binaries,
     datas=[(r'D:\\llama-console\\.venv\\Lib\\site-packages\\certifi\\cacert.pem', 'certifi'),
-           (r'D:\\llama-console\\assets\\LlamaDeck.ico', 'assets')],
+           (r'D:\\llama-console\\assets\\LlamaDeck.ico', 'assets'),
+           (r'D:\\services\\lhm\\LibreHardwareMonitorLib.dll', '.')] + _pn_datas,
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},
