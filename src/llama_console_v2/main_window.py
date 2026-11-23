@@ -159,9 +159,8 @@ class MainWindow(QMainWindow):
         # 原因: offscreen 下窗口尺寸=client 高度, 但 Windows 真机的标题栏/边框会额外
         # 占用 client 高度 (~30-40px), 导致同尺寸下真机内容比模拟多一截而触发滚动条.
         # 乘 0.93 让内容整体缩小约 7%, 抵消该占用并留出垂直余量, 真机不再出现滚动条.
-        # 记住展开 scale 的基线, set_compact(False) 用同一算法还原
-        self._expanded_scale_base = (win_w, win_h)
-        t.set_font_scale(t.compute_font_scale(win_w, win_h) * 0.93)
+        # font_scale 永久固定 0.80; 两模式元素尺寸完全一致
+        t.set_font_scale(t.COMPACT["font_scale"])
         self.resize(win_w, win_h)
 
         # Central widget
@@ -600,9 +599,6 @@ class MainWindow(QMainWindow):
         self._compact = compact
         self._settings.setValue("compact_mode", compact)
         if compact:
-            # compact 用固定 0.80 缩放, 免得大屏展开的 scale 挤爆 980×300 布局
-            t.set_font_scale(t.COMPACT["font_scale"])
-            t.rescale_all_geometries()
             self._compact_frame.set_border_color(self._player_page.border_color())
             if self._stack.parent() is not self._compact_frame:
                 self._body_layout.removeWidget(self._stack)
@@ -617,9 +613,6 @@ class MainWindow(QMainWindow):
             self._compact_frame.hide()
             self._body.hide()
             self._dashboard_frame.show()
-            ew, eh = self._expanded_scale_base
-            t.set_font_scale(t.compute_font_scale(ew, eh) * 0.93)  # 同 __init__ 算法还原
-            t.rescale_all_geometries()
             # 宽度全程不变 (同紧凑); 只按 Dashboard 内容拉伸高度
             rw = t.scaled(t.COMPACT["width"])
             inset = t.scaled(t.COMPACT["frame_margin"]) + t.scaled(t.COMPACT["border_width"], floor=1)
@@ -667,20 +660,8 @@ class MainWindow(QMainWindow):
         self._resize_timer.start()
 
     def _apply_rescale(self) -> None:
-        """防抖后真正执行: 缩放 + 重算 + 重布局."""
-        new_scale = t.compute_font_scale(self.width(), self.height())
-        old_scale = t.get_font_scale()
-        if abs(new_scale - old_scale) < 0.05:
-            return  # Quinn 09:30: 阈值 0.02 → 0.05, 减少微小 resize 反复触发
-        ratio = new_scale / old_scale
-        t.set_font_scale(new_scale)
-        # 1) 重算并应用所有已注册 widget 的几何（min/max/fixed height/width）
+        """font_scale 永久固定 0.80; resize 只重算几何, 唔再改字号."""
         t.rescale_all_geometries()
-        # 2) 重算并应用所有显式设置了字号的字体（兼容已 setFont 的 widget）
-        self._rescale_fonts(self, ratio)
-        # 3) 触发子页面重新布局
-        if hasattr(self, "_console_page") and self._console_page is not None:
-            self._console_page._force_relayout()
 
     @staticmethod
     def _rescale_fonts(widget, ratio: float) -> None:

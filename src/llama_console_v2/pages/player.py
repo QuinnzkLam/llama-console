@@ -258,14 +258,17 @@ class _ExpandButton(QPushButton):
         p.setPen(pen)
         c = self.rect().center()
         r, head = t.scaled(7), t.scaled(4)
-        p.drawLine(c.x() - r, c.y() - r, c.x() + r, c.y() + r)
         if self._collapse:
-            # ↘↖ : 箭头指向中心 (收窄语义)
-            p.drawLine(c.x() - head, c.y() - head, c.x(), c.y() - head)
-            p.drawLine(c.x() - head, c.y() - head, c.x() - head, c.y())
-            p.drawLine(c.x() + head, c.y() + head, c.x(), c.y() + head)
-            p.drawLine(c.x() + head, c.y() + head, c.x() + head, c.y())
+            # ↘↖ : 两段由两角指向中心, head 在内端, 中间留空
+            gap = t.scaled(3)
+            p.drawLine(c.x() - r, c.y() - r, c.x() - gap, c.y() - gap)
+            p.drawLine(c.x() - gap, c.y() - gap, c.x() - gap - head, c.y() - gap)
+            p.drawLine(c.x() - gap, c.y() - gap, c.x() - gap, c.y() - gap - head)
+            p.drawLine(c.x() + r, c.y() + r, c.x() + gap, c.y() + gap)
+            p.drawLine(c.x() + gap, c.y() + gap, c.x() + gap + head, c.y() + gap)
+            p.drawLine(c.x() + gap, c.y() + gap, c.x() + gap, c.y() + gap + head)
         else:
+            p.drawLine(c.x() - r, c.y() - r, c.x() + r, c.y() + r)
             # ↖↘ : 箭头指向两端 (展开语义)
             p.drawLine(c.x() + r, c.y() + r, c.x() + r - head, c.y() + r)
             p.drawLine(c.x() + r, c.y() + r, c.x() + r, c.y() + r - head)

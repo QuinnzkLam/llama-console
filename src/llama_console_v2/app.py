@@ -8,10 +8,11 @@ Quinn 10:15 (第五轮): 修启动崩溃
 - 改为 _set_app_attr() 防御式: 只 set 已存在的属性, 版本差异永不崩溃。
 """
 import faulthandler
+import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontDatabase, QPalette, QColor
 from PySide6.QtWidgets import QApplication
 
@@ -67,7 +68,20 @@ def _apply_font(app: QApplication) -> None:
     app.setFont(font)
 
 
+def _debug_screenshot(window) -> None:
+    """远程视觉迭代用: 静默 grab 窗口并 atomic 覆写 debug 截图."""
+    try:
+        target = Path(r"D:\llama-console\logs\debug_screenshot.png")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name("debug_screenshot.png.tmp")
+        if window.grab().save(str(tmp)):
+            os.replace(tmp, target)
+    except Exception:  # noqa: BLE001 — 截图失败绝不影响 GUI
+        pass
+
+
 def main() -> int:
+    debug_shot = os.environ.get("LLAMADECK_DEBUG_SHOT") == "1"
     # 原生 crash (LHM / NVML) 留低 Python trace, 方便远端诊断
     try:
         log_dir = Path("D:/llama-console/logs")
@@ -98,6 +112,14 @@ def main() -> int:
     if window.centralWidget() is not None:
         window.centralWidget().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
     window.show()
+
+    if debug_shot:
+        QTimer.singleShot(3000, lambda: _debug_screenshot(window))  # 首拍
+        shot_timer = QTimer(window)  # parent 到 window, 唔会被 GC
+        shot_timer.setInterval(10000)
+        shot_timer.timeout.connect(lambda: _debug_screenshot(window))
+        shot_timer.start()
+
     return app.exec()
 
 
