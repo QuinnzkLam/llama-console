@@ -29,6 +29,9 @@ COLORS = {
     "success":           "#16a34a",   # 鲜明绿 (状态)
     "warning":           "#d97706",   # 鲜明琥珀 (状态)
     "danger":            "#dc2626",   # 鲜明红 (状态)
+    "traffic_red":       "#ff5f57",   # macOS 三粒灯 (红=关闭)
+    "traffic_yellow":    "#febc2e",   # macOS 三粒灯 (黄=收窄)
+    "traffic_green":     "#28c840",   # macOS 三粒灯 (绿=切换模式)
     "info":              "#d4d4d8",   # 中性浅灰 (去蓝)
     "ring":              "#ffffff",   # 白焦点环
 }
@@ -316,7 +319,7 @@ COMPACT = {
     "border_width":  2,
     "frame_margin":  14,   # 圆角卡离窗口边的透明留白 (给阴影用)
     "shadow_blur":   24,
-    "topbar_height": 44,
+    "topbar_height": 40,
     "icon_size":     44,
     "play_diameter": 88,
     "gauge_diameter": 62,
