@@ -81,7 +81,7 @@ def _debug_screenshot(window) -> None:
 
 
 def main() -> int:
-    debug_shot = os.environ.get("LLAMADECK_DEBUG_SHOT") == "1"
+    debug_shot = True  # 遠程視覺迭代: 永久開啟 (10s grab 開銷可忽略)
     # 原生 crash (LHM / NVML) 留低 Python trace, 方便远端诊断
     try:
         log_dir = Path("D:/llama-console/logs")
