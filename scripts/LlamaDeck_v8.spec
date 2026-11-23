@@ -84,7 +84,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='NLM',
+    name='LlamaDeck',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -98,5 +98,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(Path(r'D:\llama-console\assets\NLM.ico')),
+    icon=str(Path(r'D:\llama-console\assets\LlamaDeck.ico')),
 )
