@@ -302,3 +302,30 @@ def card_pad(name: str) -> int:
 
 def status_color(state: str) -> str:
     return STATUS_COLORS.get(state, "text_muted")
+
+
+# ============================================================
+# LlamaDeck v3 — 新增 token (只追加, 不改上面任何现有值)
+# 所有 compact/ring 尺寸皆经 t.scaled() 使用本表基准值.
+# ============================================================
+COMPACT = {
+    "width":         980,
+    "height":        280,
+    "radius":        14,
+    "border_width":  2,
+    "frame_margin":  14,   # 圆角卡离窗口边的透明留白 (给阴影用)
+    "shadow_blur":   24,
+    "topbar_height": 44,
+    "icon_size":     44,
+    "play_diameter": 88,
+    "gauge_diameter": 62,
+    "icon_start":    "#6366f1",  # 模型卡紫蓝渐变
+    "icon_end":      "#a855f7",
+}
+
+RING = {
+    "start":    "#a855f7",   # 数值弧渐变起点 (紫)
+    "end":      "#22d3ee",   # 数值弧渐变终点 (青)
+    "base":     "#2a2a2a",   # 底环深灰
+    "span_deg": 270,
+}
