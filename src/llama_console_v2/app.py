@@ -7,7 +7,9 @@ Quinn 10:15 (第五轮): 修启动崩溃
   枚举里不存在 (该属性是较新 Qt 才加的), 直接访问会抛 AttributeError 导致启动时崩溃。
 - 改为 _set_app_attr() 防御式: 只 set 已存在的属性, 版本差异永不崩溃。
 """
+import faulthandler
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase, QPalette, QColor
@@ -66,6 +68,15 @@ def _apply_font(app: QApplication) -> None:
 
 
 def main() -> int:
+    # 原生 crash (LHM / NVML) 留低 Python trace, 方便远端诊断
+    try:
+        log_dir = Path("D:/llama-console/logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _crash_log = (log_dir / "llamadeck_crash.log").open("a", encoding="utf-8")
+        faulthandler.enable(file=_crash_log)
+    except Exception:  # noqa: BLE001
+        faulthandler.enable()
+
     app = QApplication(sys.argv)
     app.setApplicationName("llamadeck")
     app.setApplicationDisplayName("LlamaDeck")
@@ -77,9 +88,8 @@ def main() -> int:
     _set_app_attr(app, "AA_DontUseNativeMenuBar", True)            # 用 Qt 自绘菜单 (Win 原生菜单栏重绘慢)
     _set_app_attr(app, "AA_UseHighDpiPixmaps", False)             # 关掉高 DPI 像素图 — 拖动/缩放期间图标重绘开销大
 
-    # 先按 1/4 窗口尺寸设定字体缩放，再应用到 app 默认字体，保证与卡片字体一致
-    tw, th = t.recommended_window_size()
-    t.set_font_scale(t.compute_font_scale(tw, th))
+    # 字体缩放永久固定 0.80, 两模式一致 (唔再按窗口尺寸变)
+    t.set_font_scale(t.COMPACT["font_scale"])
     _apply_font(app)
     _apply_dark_palette(app)
 
