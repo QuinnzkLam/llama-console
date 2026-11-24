@@ -225,7 +225,7 @@ class SettingsPage(QWidget):
         ver_col.addLayout(latest_row)
 
         # 检查更新按钮
-        self._check_update_btn = OutlineButton("检查更新", icon_char="🔄")
+        self._check_update_btn = OutlineButton("检查更新", icon_char="↻")
         t.min_h(self._check_update_btn, 36)
         self._check_update_btn.clicked.connect(self._on_check_update)
         ver_col.addWidget(self._check_update_btn)
@@ -350,7 +350,7 @@ class SettingsPage(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(t.scaled(t.space("3")))
-        self._save_btn = PrimaryButton("保存参数", icon_char="💾")
+        self._save_btn = PrimaryButton("保存参数")
         self._reset_btn = OutlineButton("恢复默认", icon_char="↻")
         t.fixed_h(self._save_btn, 40)
         t.fixed_h(self._reset_btn, 40)
