@@ -22,7 +22,7 @@ class _TitleBar(QWidget):
         super().__init__(parent)
         self._dialog = dialog
         self._drag_from: QPoint | None = None
-        t.fixed_h(self, t.scaled(44, floor=36))
+        t.fixed_h(self, 44, floor=36)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(
             t.scaled(t.card_pad("inner_lr")), t.scaled(4),

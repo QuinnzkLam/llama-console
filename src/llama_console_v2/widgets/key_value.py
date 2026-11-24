@@ -55,7 +55,7 @@ class KeyValueRow(QWidget):
         layout.addWidget(self._value)
 
         # Quinn 16:55: 给 row 一个明确的 min_h, 防止父容器挤压时 label/value 重叠
-        t.min_h(self, t.scaled(36, floor=28))
+        t.min_h(self, 36, floor=28)
 
     def set_value(self, value: str) -> None:
         self._value.setText(value)
