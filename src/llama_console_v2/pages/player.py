@@ -234,30 +234,49 @@ class _RedButton(QPushButton):
 
 
 class _ExpandButton(QPushButton):
-    """窗口右下角自绘对角双向箭头 (紧凑展开 / 展开收窄)."""
+    """右下角模式切换 (紧凑展开 / 展开收窄).
+
+    2026-11-24 Quinn 反饋: 裸箭頭浮喺角落完全唔貼風格 → 改圓形 ghost
+    按鈕 (card 底 + border 勾邊, hover 提亮), 同 ⚙ / 紅燈同一風格語言.
+    小 widget stylesheet border-radius 會渲染成方 (見 _RedButton), 圓底自繪.
+    """
 
     def __init__(self, parent: QWidget | None = None, direction: str = "expand") -> None:
         super().__init__(parent)
         self._collapse = direction == "collapse"
+        self._hover = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("收窄" if self._collapse else "展开 / 收窄")
         t.fixed_w(self, 28)
         t.fixed_h(self, 28)
-        self.setStyleSheet(
-            f"QPushButton {{ background: transparent; border: none; "
-            f"border-radius: {t.scaled(6)}px; }} "
-            f"QPushButton:hover {{ background-color: {t.color('card_hover')}; }}"
-        )
+        self.setStyleSheet("QPushButton { background: transparent; border: none; }")
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(t.color("text_secondary")), max(1, t.scaled(2, floor=1)))
+        # 圓形 ghost 底 (inset 1px 畀 1px 勾邊)
+        p.setPen(QPen(QColor(t.color("border")), 1))
+        p.setBrush(QColor(t.color("card_hover" if self._hover else "card")))
+        p.drawEllipse(QRectF(1, 1, self.width() - 2, self.height() - 2))
+        pen = QPen(
+            QColor(t.color("text_primary" if self._hover else "text_secondary")),
+            max(1, t.scaled(2, floor=1)),
+        )
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         c = self.rect().center()
-        r, head = t.scaled(7), t.scaled(4)
+        r, head = t.scaled(6), t.scaled(3, floor=2)
         if self._collapse:
             # ↘↖ : 两段由两角指向中心, head 在内端, 中间留空
             gap = t.scaled(3)
@@ -496,7 +515,7 @@ class PlayerPage(QWidget):
     def _place_expand_button(self) -> None:
         btn = getattr(self, "_expand_btn", None)
         if btn is not None:
-            m = t.scaled(8)
+            m = t.scaled(12)
             btn.move(self.width() - btn.width() - m, self.height() - btn.height() - m)
             btn.raise_()
 

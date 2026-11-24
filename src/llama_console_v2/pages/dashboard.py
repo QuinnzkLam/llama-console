@@ -142,7 +142,7 @@ class DashboardPage(QWidget):
 
     def _place_expand_button(self) -> None:
         btn = self._expand_btn
-        m = t.scaled(8)
+        m = t.scaled(12)
         btn.move(self.width() - btn.width() - m, self.height() - btn.height() - m)
         btn.raise_()
 
