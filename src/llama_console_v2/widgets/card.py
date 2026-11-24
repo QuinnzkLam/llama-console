@@ -118,8 +118,10 @@ class Card(QFrame):
 
         # Quinn 16:08: title_row 高度 = xl header + 上下 padding (4+5)
         # R12 (17:38): 改一致缩放, 避免「基础值32 + 缩放值27」混搭导致 title_row 被压
-        #   → 标题 (ElideLabel) 可见高度不足被竖向截断 (FRP/Token 标题只显一半/3/4)
-        t.min_h(title_row, t.scaled(t.row_height("xl") + t.space("4") + t.space("5")))
+        # 2026-11-24 Quinn「字体被折断」: min_h 喺總高度不足時仍會被 layout 壓扁
+        #   (SettingsDialog 640px 裝唔低 → 標題行壓到 14px, 14pt 字形豎向裁斷)
+        #   → 改 fixed_h 鎖死, 高度不足時由 stretch=1 嘅 editor/body 吸收
+        t.fixed_h(title_row, t.scaled(t.row_height("xl") + t.space("4") + t.space("5")))
         outer.addWidget(title_row)
 
         # Quinn 16:08: body 内部自动套 padding + spacing；调用方统一用 card.body_layout

@@ -62,7 +62,9 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("设置")
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.resize(900, 640)
+        # 2026-11-24: 640px 裝唔低內容最小高度 → layout 壓扁標題行 (字形豎向裁斷)
+        # 700px + editor min_h 降低 + title_row fixed 後, 壓縮由 editor 吸收
+        self.resize(900, 700)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(_MARGIN, _MARGIN, _MARGIN, _MARGIN)
