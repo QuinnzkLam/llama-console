@@ -35,8 +35,11 @@ _LLAMA_PROCESS_NAMES: tuple[str, ...] = (
     "llama-server.exe",
     "llama-server-impl.exe",
 )
-# Forward-compat: any llama*.exe (e.g. 未来 stub 改名叫 llama-server-cuda.exe)
-_LLAMA_PROCESS_PATTERN = re.compile(r"^llama.*\.exe$", re.IGNORECASE)
+# Forward-compat: llama-server 變體 (e.g. 未来改名叫 llama-server-cuda.exe)
+# 2026-11-24 根因修復: 舊 pattern "^llama.*\.exe$" 連 GUI 自己 (LlamaDeck.exe)
+# 都匹配 → stop() forward-compat scan taskkill 自己 (按停止=窗口關閉) +
+# _find_process() 返 GUI pid (uptime 顯示 GUI 時間)。改精確匹配 llama-server*。
+_LLAMA_PROCESS_PATTERN = re.compile(r"^llama-server(-impl)?\.exe$", re.IGNORECASE)
 DEFAULT_PORT = 18605
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_CTX = 262144
@@ -281,8 +284,11 @@ def _find_process() -> psutil.Process | None:
     倒序排, 揀最新嗰个 — 兼容 stub launcher + 直 spawn 两种路径。
     """
     candidates: list[tuple[float, psutil.Process]] = []
+    my_pid = os.getpid()
     for p in psutil.process_iter(["name", "pid", "create_time"]):
         try:
+            if p.info["pid"] == my_pid:
+                continue  # GUI 本體 (LlamaDeck.exe) 唔算 llama-server (2026-11-24)
             name = p.info["name"]
             if not name:
                 continue
@@ -835,8 +841,11 @@ def stop() -> dict:
                 if result.returncode == 0:
                     killed.append(name)
             # Forward-compat: 如果当时有其他 llama*.exe 跑紧, 主动探一下并 kill
+            my_pid = os.getpid()
             for p in psutil.process_iter(["name"]):
                 try:
+                    if p.info["pid"] == my_pid:
+                        continue  # 唔好自殺 — GUI 本體都匹配 llama* pattern (2026-11-24)
                     pname = p.info["name"]
                     if pname and _LLAMA_PROCESS_PATTERN.match(pname) and pname not in killed:
                         result = subprocess.run(
