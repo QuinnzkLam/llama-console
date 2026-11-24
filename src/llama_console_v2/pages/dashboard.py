@@ -133,11 +133,7 @@ class DashboardPage(QWidget):
         self._expand_btn.clicked.connect(lambda: self.compactRequested.emit(True))
         self._place_expand_button()
 
-        self._poll = QTimer(self)
-        self._poll.setInterval(2000)
-        self._poll.timeout.connect(self._refresh)
-        self._poll.start()
-        self._refresh()
+        # 2026-11-24: 輪詢上收 MainWindow 單一數據源 (狀態/硬件/邊框燈同步)
 
     # ---------------- 构建 ----------------
     def border_color(self) -> str:
@@ -245,10 +241,11 @@ class DashboardPage(QWidget):
         return row
 
     # ---------------- 刷新 ----------------
-    def _refresh(self) -> None:
+    def apply_shared(self, state: str, pid, force: str | None, hw) -> None:
+        """MainWindow 單一數據源推送 (2026-11-24) — 轉發內嵌播放器 + 刷新硬件."""
+        self._player.apply_shared(state, pid, force, None)
         try:
-            hw = backend_hw.snapshot()
-            cpu, ram, gpus = hw.cpu, hw.ram, hw.gpus
+            cpu, ram, gpus = hw.cpu, hw.ram, hw.gpus if hw else (None, None, [])
         except Exception:  # noqa: BLE001
             cpu, ram, gpus = None, None, []
 

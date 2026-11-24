@@ -320,11 +320,9 @@ class PlayerPage(QWidget):
         self._space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         self._space.activated.connect(self._toggle)
 
-        self._poll = QTimer(self)
-        self._poll.setInterval(1000)
-        self._poll.timeout.connect(self._refresh)
-        self._poll.start()
-        self._refresh()
+        # 2026-11-24: 輪詢上收 MainWindow 單一數據源 — 緊湊/展開/內嵌
+        # 三個實例各自 poll 會令狀態、邊框燈、硬件環數據互相唔同步.
+        # 初始由 MainWindow._poll_shared() singleShot 推送.
 
     # ---------------- 构建 ----------------
     def _build_top_bar(self) -> None:
@@ -528,8 +526,6 @@ class PlayerPage(QWidget):
             self._start_ts = None
             self._runningish = False
             self._play.setRunning(False)
-            self._force_state = "stopping"   # 立即顯示「關閉中」橙色, 唔等 poll
-            self._last_key = None
             self.stopRequested.emit()
         else:
             self._start_ts = time.time()
@@ -561,29 +557,23 @@ class PlayerPage(QWidget):
             self._combo.setSubText(stem or model)
 
     def mark_failed(self) -> None:
-        """MainWindow 在 health 不可达时同步标记失败 (与 sidebar pill 同源)."""
-        self._force_state = "failed"
+        """MainWindow 在 health 不可达时同步标记失败 (与 sidebar pill 同源).
+
+        2026-11-24: force 狀態上收 MainWindow, 呢度只清快取畀下一次
+        apply_shared 正確重繪 (MainWindow 會即刻推 shared).
+        """
         self._last_key = None
-        self._refresh()
 
     def border_color(self) -> str:
         return t.color(_BORDER_COLOR.get(self._last_key or "idle", "danger"))
 
     # ---------------- 刷新 ----------------
-    def _refresh(self) -> None:
-        try:
-            snap = backend_llama.snapshot()
-            state, pid = snap.state, snap.pid
-        except Exception:  # noqa: BLE001
-            state, pid = "stopped", None
+    def apply_shared(self, state: str, pid, force: str | None, hw) -> None:
+        """MainWindow 單一數據源推送 — llama 狀態 + 硬件快照 (2026-11-24).
 
-        force = self._force_state
-        if force == "failed" and state == "running":
-            self._force_state = None
-            force = None
-        elif force == "stopping" and state in ("stopped", "idle"):
-            self._force_state = None  # 服務已死: 顯示返「待启动」
-            force = None
+        緊湊頁 / 內嵌播放器共用同一份快照: 狀態燈、邊框色、uptime、
+        硬件環全部同步, 唔再各自採樣.
+        """
         key = _state_key(force or state)
         text, color_key, self._runningish = _STATE_VIEW[key]
         self._combo.setEnabled(not self._runningish)  # 运行中锁定模型选择
@@ -601,8 +591,7 @@ class PlayerPage(QWidget):
         if self._embedded:  # Dashboard 自带 6 环, 内嵌播放器唔重复采样
             return
         try:
-            hw = backend_hw.snapshot()
-            cpu, ram, gpus = hw.cpu, hw.ram, hw.gpus
+            cpu, ram, gpus = hw.cpu, hw.ram, hw.gpus if hw else (None, None, [])
         except Exception:  # noqa: BLE001
             cpu, ram, gpus = None, None, []
         self._apply_gauges(cpu, ram, gpus)

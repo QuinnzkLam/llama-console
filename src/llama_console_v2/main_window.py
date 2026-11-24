@@ -36,6 +36,7 @@ from llama_console_v2.pages.settings import SettingsPage
 from llama_console_v2.pages.settings_dialog import SettingsDialog
 from llama_console_v2.widgets.server_control import ServerControlSidebar
 from llama_console_v2.backend import llama_cpp as backend_llama
+from llama_console_v2.backend import hardware as backend_hw  # 2026-11-24 單一數據源中央輪詢
 from llama_console_v2.backend import frp as backend_frp  # 2026-08-31 (B1): GUI 启停同步启停 frp
 
 
@@ -268,6 +269,16 @@ class MainWindow(QMainWindow):
         self._compact: bool | None = None
         self.set_compact(bool(self._settings.value("compact_mode", True, type=bool)))
 
+        # 2026-11-24 單一數據源: 緊湊頁/展開頁/內嵌播放器共用一份 llama 狀態
+        # + 硬件快照 (之前三個實例各自 poll, 狀態/邊框燈/數據互相唔同步).
+        # force 狀態 (stopping/starting/failed) 都收喺 MainWindow.
+        self._force_state: str | None = None
+        self._state_poll = QTimer(self)
+        self._state_poll.setInterval(2000)
+        self._state_poll.timeout.connect(self._poll_shared)
+        self._state_poll.start()
+        QTimer.singleShot(0, self._poll_shared)
+
     def _build_sidebar(self) -> QWidget:
         """Sidebar: 与窗口同高的独立侧边栏页面元素.
 
@@ -334,6 +345,30 @@ class MainWindow(QMainWindow):
 
         return sidebar
 
+    def _poll_shared(self) -> None:
+        """單一數據源: 採樣一次 → 同步推送兩頁 (含內嵌播放器)."""
+        try:
+            snap = backend_llama.snapshot()
+            state, pid = snap.state, snap.pid
+        except Exception:  # noqa: BLE001
+            state, pid = "stopped", None
+        try:
+            hw = backend_hw.snapshot()
+        except Exception:  # noqa: BLE001
+            hw = None
+        force = self._force_state
+        if force == "failed" and state == "running":
+            self._force_state = None
+            force = None
+        elif force == "starting" and state == "running":
+            self._force_state = None
+            force = None
+        elif force == "stopping" and state in ("stopped", "idle"):
+            self._force_state = None  # 服務已死: 顯示返「待启动」
+            force = None
+        self._player_page.apply_shared(state, pid, force, hw)
+        self._dashboard_page.apply_shared(state, pid, force, hw)
+
     def _on_sidebar_start(self) -> None:
         """侧边栏「启动」按钮: 读 JSON 配置 dict 作为 extra_args 启动.
 
@@ -349,6 +384,8 @@ class MainWindow(QMainWindow):
         — 同步起 frpc tunnel. 幂等: frpc 已经在跑 → no-op. 错误全捕获
         (frp.start_frpc 唔 throw), 所以 frp 失败都唔会 crash GUI.
         """
+        self._force_state = "starting"
+        self._poll_shared()  # 即時顯示「启动中」黃色 (兩頁同步)
         try:
             extra_args_dict = backend_llama.load_cmdline_args_dict()
         except Exception:
@@ -383,7 +420,8 @@ class MainWindow(QMainWindow):
             print(f"[main_window] start ok but health unreachable, log: {log_path}")
             self._show_error_banner(log_path, err or "health endpoint not reachable in 3s")
             self._server_ctrl.mark_failed()  # 立即 pill 切到「启动失败」
-            self._player_page.mark_failed()  # 播放器边框/状态点同步失败态
+            self._force_state = "failed"
+            self._poll_shared()  # 播放器/展開頁邊框同步失败态 (單一數據源)
         # 切到控制台 + 多次刷新 (启动 → loading → running); 紧凑模式保持播放器页
         if not self._compact:
             self._switch_to(0)
@@ -405,6 +443,8 @@ class MainWindow(QMainWindow):
           弹错误 banner 明确告知用户, 并提示需要 UAC 授权.
         - elevated=True 时提示「已通过管理员授权停止」.
         """
+        self._force_state = "stopping"
+        self._poll_shared()  # 即時顯示「關閉中」橙色 (兩頁同步)
         try:
             stop_res = backend_llama.stop()
         except Exception as e:
@@ -439,6 +479,7 @@ class MainWindow(QMainWindow):
         else:
             print(f"[main_window] FRP 停止失败: {frp_res.get('error')}")
         self._server_ctrl.refresh()  # 立即更新 pill 到 stopped
+        self._poll_shared()
         QTimer.singleShot(0, self._console_page.refresh)
         QTimer.singleShot(1500, self._console_page.refresh)
         QTimer.singleShot(3500, self._console_page.refresh)
