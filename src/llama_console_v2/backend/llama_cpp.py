@@ -884,7 +884,13 @@ def stop() -> dict:
                     capture_output=True, text=True, timeout=10,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                time.sleep(3.0)
+                # taskkill 殺 27B 模型進程要幾秒 (VRAM/上下文釋放) —
+                # 輪詢最多 12s, 唔好死等 3s 誤判 residual (2026-11-24 真機實測)
+                deadline = time.monotonic() + 12.0
+                while time.monotonic() < deadline:
+                    if _find_process() is None:
+                        break
+                    time.sleep(1.0)
                 if _find_process() is None:
                     residual = False
                     elevated = True

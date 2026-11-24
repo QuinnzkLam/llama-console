@@ -420,8 +420,8 @@ class MainWindow(QMainWindow):
             if elevated:
                 msg = "已发起管理员授权停止, 但 llama-server 仍未能终止, 请检查"
             elif residual:
-                msg = ("llama-server 由计划任务以管理员权限启动, 普通权限无法停止; "
-                       "请在系统弹窗中允许管理员授权")
+                msg = ("llama-server 提权停止失败 (计划任务 Hedanji-Llama-Stop 已触发); "
+                       "请手动结束进程或重启后再试")
             print(f"[main_window] stop issue: {msg}")
             self._show_error_banner("", msg)
         elif elevated:

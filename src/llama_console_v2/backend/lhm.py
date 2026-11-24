@@ -35,6 +35,20 @@ def _empty() -> SimpleNamespace:
 def _spawn() -> None:
     global _PROC, _LAST_ERROR
     try:
+        if getattr(sys, "frozen", False) and os.name == "nt":
+            # 2026-11-24: 改觸發 S4U+Highest 計劃任務 Hedanji-LHM-Worker
+            # (常駐, 同 GUI 生命週期解耦). 唔再 spawn onefile 子進程 —
+            # 子進程退出時 PyInstaller 刪唔到 _MEI 暫存目錄 (pythonnet
+            # DLL 鎖住) 會彈 "Failed to remove temporary directory" modal 警告.
+            result = subprocess.run(
+                ["schtasks", "/Run", "/TN", "Hedanji-LHM-Worker"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if result.returncode == 0:
+                _LAST_ERROR = "LHM worker (計劃任務) 啟動中…"
+                return
+            # schtasks 失敗 (未註冊任務等) → fallback 舊子進程路徑
         if getattr(sys, "frozen", False):
             args = [sys.executable, "--lhm-worker"]
         else:
