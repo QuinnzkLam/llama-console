@@ -1492,6 +1492,34 @@ def _load_token_state() -> dict | None:
     return None
 
 
+# 2026-11-24: llama.cpp 新版 rate gauge (prompt_tokens_seconds 等) 係
+# 「當前/最近請求」瞬時值, 空閒時歸 0 — 直接讀會令 t/s 長期顯示 0.0.
+# 改自己用 counter 差分算真實速率 (後台採樣 ~2s 一次, EMA 平滑).
+_TOK_RATE_STATE: dict = {"ts": None, "prompt": None, "predicted": None,
+                         "prompt_tps": 0.0, "predicted_tps": 0.0}
+
+
+def _compute_token_rates(prompt_total, predicted_total) -> tuple[float, float]:
+    """counter 差分 → EMA 平滑 tok/s (server 重啟計數歸零時自動重置)."""
+    st = _TOK_RATE_STATE
+    now = time.monotonic()
+    pt, gt = st["prompt_tps"], st["predicted_tps"]
+    if prompt_total is not None and predicted_total is not None:
+        if st["ts"] is not None and st["prompt"] is not None \
+                and prompt_total >= st["prompt"] and predicted_total >= st["predicted"]:
+            dt = now - st["ts"]
+            if dt >= 0.5:
+                # EMA 0.6 新值 / 0.4 舊值 — 防單次採樣抖動
+                pt = st["prompt_tps"] * 0.4 + ((prompt_total - st["prompt"]) / dt) * 0.6
+                gt = st["predicted_tps"] * 0.4 + ((predicted_total - st["predicted"]) / dt) * 0.6
+        elif st["prompt"] is not None and (prompt_total < st["prompt"]):
+            # server 重啟: 計數器歸零 → 重置速率
+            pt = gt = 0.0
+    st.update(ts=now, prompt=prompt_total, predicted=predicted_total,
+              prompt_tps=pt, predicted_tps=gt)
+    return round(pt, 1), round(gt, 1)
+
+
 def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
     """实际执行一次 /metrics 拉取 + 解析 (后台线程调用, 用 0.4s 短超时).
 
@@ -1547,8 +1575,9 @@ def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
                 or metrics.get("llamacpp:tokens_predicted_generated_total", 0)
                 or 0
             )
-            ns.prompt_tps = float(metrics.get("llamacpp:prompt_tokens_seconds", 0) or 0)
-            ns.predicted_tps = float(metrics.get("llamacpp:predicted_tokens_seconds", 0) or 0)
+            # 2026-11-24: gauge 空閒歸 0 唔可用 → counter 差分算真實速率
+            ns.prompt_tps, ns.predicted_tps = _compute_token_rates(
+                ns.prompt_tokens, ns.predicted_tokens)
             ns.available = True
             ns.stale = False
             ns.stale_ts = None
