@@ -5,9 +5,10 @@
 # The --distpath flag is REQUIRED: PyInstaller's default dist folder is
 # relative to the spec file's own dir, which would put NLM.exe into
 # scripts\dist\ instead of the repo-root dist\ (where it must stay).
+import glob
 import sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_all
 
 block_cipher = None
 
@@ -30,7 +31,7 @@ for pkg_name in ['llama_console_v2',
 # explicit safety nets
     hidden += ['email', 'email.message', 'email.utils', 'email.parser', 'email.feedparser', 'email._policybase', 'email._encoded_words', 'email.charset', 'email.base64mime', 'email.quoprimime', 'urllib', 'urllib.request', 'urllib.parse', 'urllib.error']
 hidden += ['app', 'theme', 'main_window', 'backend',
-           'pages.console', 'pages.settings',
+           'pages.console', 'pages.settings', 'pages.dashboard', 'pages.settings_dialog',
            'widgets.card', 'widgets.buttons', 'widgets.chip_icon',
            'widgets.key_value', 'widgets.page_chrome', 'widgets.progress_bar',
            'widgets.server_control', 'widgets.stat_block', 'widgets.status_pill',
@@ -39,6 +40,10 @@ hidden += ['app', 'theme', 'main_window', 'backend',
 # Worker 2026-08-28 17:33 GMT+8 fix (v6 -> v7): bundle pywin32 so hardware.py can use
 # win32com.client (WMI CPU model) and win32pdh (live CPU MHz / RAM perf counters)
 # instead of falling back to "unknown" when pywin32 is missing from frozen exe.
+# pythonnet (LHM PoC) — collect_all 最稳: 埋 clr_loader / pythonnet runtime 全部 datas/binaries
+_pn_datas, _pn_binaries, _pn_hidden = collect_all('pythonnet')
+hidden += _pn_hidden
+
 hidden += ['win32com', 'win32com.client', 'win32pdh', 'pywintypes', 'pythoncom',
            'win32api', 'win32process', 'win32security', 'win32clipboard',
            'win32com.server', 'win32com.shell', 'win32com.adsi',
@@ -52,8 +57,12 @@ hidden += ['win32com', 'win32com.client', 'win32pdh', 'pywintypes', 'pythoncom',
 a = Analysis(
     [str(v2_root / '__main__.py')],
     pathex=[str(v2_parent)],
-    binaries=[],
-    datas=[(r'D:\\llama-console\\.venv\\Lib\\site-packages\\certifi\\cacert.pem', 'certifi')],
+    binaries=_pn_binaries,
+    datas=[(r'D:\\llama-console\\.venv\\Lib\\site-packages\\certifi\\cacert.pem', 'certifi'),
+           (r'D:\\llama-console\\assets\\LlamaDeck.ico', 'assets'),
+           (r'D:\\services\\lhm\\LibreHardwareMonitorLib.dll', '.')]
+           + _pn_datas
+           + [(f, '.') for f in glob.glob(r'D:\services\lhm\*.dll')],
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},
@@ -84,7 +93,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='NLM',
+    name='LlamaDeck',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -98,5 +107,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(Path(r'D:\llama-console\assets\NLM.ico')),
+    icon=str(Path(r'D:\llama-console\assets\LlamaDeck.ico')),
 )

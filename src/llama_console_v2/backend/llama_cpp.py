@@ -35,8 +35,11 @@ _LLAMA_PROCESS_NAMES: tuple[str, ...] = (
     "llama-server.exe",
     "llama-server-impl.exe",
 )
-# Forward-compat: any llama*.exe (e.g. 未来 stub 改名叫 llama-server-cuda.exe)
-_LLAMA_PROCESS_PATTERN = re.compile(r"^llama.*\.exe$", re.IGNORECASE)
+# Forward-compat: llama-server 變體 (e.g. 未来改名叫 llama-server-cuda.exe)
+# 2026-11-24 根因修復: 舊 pattern "^llama.*\.exe$" 連 GUI 自己 (LlamaDeck.exe)
+# 都匹配 → stop() forward-compat scan taskkill 自己 (按停止=窗口關閉) +
+# _find_process() 返 GUI pid (uptime 顯示 GUI 時間)。改精確匹配 llama-server*。
+_LLAMA_PROCESS_PATTERN = re.compile(r"^llama-server(-impl)?\.exe$", re.IGNORECASE)
 DEFAULT_PORT = 18605
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_CTX = 262144
@@ -281,8 +284,11 @@ def _find_process() -> psutil.Process | None:
     倒序排, 揀最新嗰个 — 兼容 stub launcher + 直 spawn 两种路径。
     """
     candidates: list[tuple[float, psutil.Process]] = []
+    my_pid = os.getpid()
     for p in psutil.process_iter(["name", "pid", "create_time"]):
         try:
+            if p.info["pid"] == my_pid:
+                continue  # GUI 本體 (LlamaDeck.exe) 唔算 llama-server (2026-11-24)
             name = p.info["name"]
             if not name:
                 continue
@@ -835,8 +841,11 @@ def stop() -> dict:
                 if result.returncode == 0:
                     killed.append(name)
             # Forward-compat: 如果当时有其他 llama*.exe 跑紧, 主动探一下并 kill
-            for p in psutil.process_iter(["name"]):
+            my_pid = os.getpid()
+            for p in psutil.process_iter(["name", "pid"]):
                 try:
+                    if p.info["pid"] == my_pid:
+                        continue  # 唔好自殺 — GUI 本體都匹配 llama* pattern (2026-11-24)
                     pname = p.info["name"]
                     if pname and _LLAMA_PROCESS_PATTERN.match(pname) and pname not in killed:
                         result = subprocess.run(
@@ -867,13 +876,36 @@ def stop() -> dict:
         else:
             residual = True
         if residual:
-            elevated = _elevated_kill_llama()
-            # 再等一次让 elevated taskkill 生效
-            time.sleep(2.0)
-            if _find_process() is None:
-                residual = False
-                if "llama-server.exe (elevated)" not in killed:
-                    killed.append("llama-server.exe (elevated)")
+            # 2026-11-24: 優先用提權計劃任務 Hedanji-Llama-Stop (schtasks /Run
+            # 唔彈 UAC — task scheduler 以 S4U+Highest 執行 taskkill)
+            try:
+                subprocess.run(
+                    ["schtasks", "/Run", "/TN", "Hedanji-Llama-Stop"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                # taskkill 殺 27B 模型進程要幾秒 (VRAM/上下文釋放) —
+                # 輪詢最多 12s, 唔好死等 3s 誤判 residual (2026-11-24 真機實測)
+                deadline = time.monotonic() + 12.0
+                while time.monotonic() < deadline:
+                    if _find_process() is None:
+                        break
+                    time.sleep(1.0)
+                if _find_process() is None:
+                    residual = False
+                    elevated = True
+                    if "llama-server.exe (elevated-task)" not in killed:
+                        killed.append("llama-server.exe (elevated-task)")
+            except Exception:  # noqa: BLE001 — schtasks 失敗 fallback UAC
+                pass
+            if residual:
+                elevated = _elevated_kill_llama()
+                # 再等一次让 elevated taskkill 生效
+                time.sleep(2.0)
+                if _find_process() is None:
+                    residual = False
+                    if "llama-server.exe (elevated)" not in killed:
+                        killed.append("llama-server.exe (elevated)")
         return {"ok": True, "killed": killed, "elevated": elevated,
                 "residual": residual, "error": None}
     except Exception as e:
@@ -1460,6 +1492,34 @@ def _load_token_state() -> dict | None:
     return None
 
 
+# 2026-11-24: llama.cpp 新版 rate gauge (prompt_tokens_seconds 等) 係
+# 「當前/最近請求」瞬時值, 空閒時歸 0 — 直接讀會令 t/s 長期顯示 0.0.
+# 改自己用 counter 差分算真實速率 (後台採樣 ~2s 一次, EMA 平滑).
+_TOK_RATE_STATE: dict = {"ts": None, "prompt": None, "predicted": None,
+                         "prompt_tps": 0.0, "predicted_tps": 0.0}
+
+
+def _compute_token_rates(prompt_total, predicted_total) -> tuple[float, float]:
+    """counter 差分 → EMA 平滑 tok/s (server 重啟計數歸零時自動重置)."""
+    st = _TOK_RATE_STATE
+    now = time.monotonic()
+    pt, gt = st["prompt_tps"], st["predicted_tps"]
+    if prompt_total is not None and predicted_total is not None:
+        if st["ts"] is not None and st["prompt"] is not None \
+                and prompt_total >= st["prompt"] and predicted_total >= st["predicted"]:
+            dt = now - st["ts"]
+            if dt >= 0.5:
+                # EMA 0.6 新值 / 0.4 舊值 — 防單次採樣抖動
+                pt = st["prompt_tps"] * 0.4 + ((prompt_total - st["prompt"]) / dt) * 0.6
+                gt = st["predicted_tps"] * 0.4 + ((predicted_total - st["predicted"]) / dt) * 0.6
+        elif st["prompt"] is not None and (prompt_total < st["prompt"]):
+            # server 重啟: 計數器歸零 → 重置速率
+            pt = gt = 0.0
+    st.update(ts=now, prompt=prompt_total, predicted=predicted_total,
+              prompt_tps=pt, predicted_tps=gt)
+    return round(pt, 1), round(gt, 1)
+
+
 def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
     """实际执行一次 /metrics 拉取 + 解析 (后台线程调用, 用 0.4s 短超时).
 
@@ -1515,8 +1575,9 @@ def _collect_token_stats_now(port: int = DEFAULT_PORT) -> SimpleNamespace:
                 or metrics.get("llamacpp:tokens_predicted_generated_total", 0)
                 or 0
             )
-            ns.prompt_tps = float(metrics.get("llamacpp:prompt_tokens_seconds", 0) or 0)
-            ns.predicted_tps = float(metrics.get("llamacpp:predicted_tokens_seconds", 0) or 0)
+            # 2026-11-24: gauge 空閒歸 0 唔可用 → counter 差分算真實速率
+            ns.prompt_tps, ns.predicted_tps = _compute_token_rates(
+                ns.prompt_tokens, ns.predicted_tokens)
             ns.available = True
             ns.stale = False
             ns.stale_ts = None

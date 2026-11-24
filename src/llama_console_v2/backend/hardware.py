@@ -119,6 +119,51 @@ def _get_cpu_live_mhz_pdh(max_mhz: int) -> int:
             return 0
 
 
+# ==== Quinn 2026-11-23: PDH 直接频率计数器 (Processor Frequency), 直接返 MHz ====
+# 唔使乘 WMI MaxClockSpeed (部分机只返标称基频 → 基准错); 模式复制自 _get_cpu_live_mhz_pdh.
+_PDH_FREQ_HANDLE: dict[str, Any] = {"query": None, "counter": None, "last_mhz": None, "last_ts": 0.0}
+_PDH_FREQ_LOCK = threading.Lock()
+
+
+def _get_cpu_live_mhz_pdh_freq() -> int:
+    """Return live CPU clock in MHz via PDH direct frequency counter.
+
+    counter: \\Processor Information(_Total)\\Processor Frequency
+    该计数器直接返回 MHz, 不依赖 WMI MaxClockSpeed 基准 (部分机器只返回标称基频).
+    限制: 需 1s 间隔采样 (PDH 内部需要 2 次 sample 先有值).
+    """
+    try:
+        import win32pdh  # type: ignore
+    except Exception:
+        return 0
+
+    with _PDH_FREQ_LOCK:
+        try:
+            if _PDH_FREQ_HANDLE["query"] is None:
+                hq = win32pdh.OpenQuery()
+                hco = win32pdh.AddCounter(
+                    hq, r"\Processor Information(_Total)\Processor Frequency"
+                )
+                _PDH_FREQ_HANDLE["query"] = hq
+                _PDH_FREQ_HANDLE["counter"] = hco
+            hq = _PDH_FREQ_HANDLE["query"]
+            hco = _PDH_FREQ_HANDLE["counter"]
+            win32pdh.CollectQueryData(hq)
+            now = time.monotonic()
+            last_ts = _PDH_FREQ_HANDLE["last_ts"]
+            if now - last_ts < 0.9:  # 至少 1s 一次 (PDH 数据需要 2 次 sample)
+                cached = _PDH_FREQ_HANDLE["last_mhz"]
+                return int(cached) if cached is not None else 0
+            win32pdh.CollectQueryData(hq)
+            raw = win32pdh.GetFormattedCounterValue(hco, win32pdh.PDH_FMT_LONG)
+            mhz = int(raw[1])
+            _PDH_FREQ_HANDLE["last_mhz"] = mhz
+            _PDH_FREQ_HANDLE["last_ts"] = now
+            return mhz
+        except Exception:
+            return 0
+
+
 def _get_cpu_max_mhz() -> int:
     """Return CPU max clock speed in MHz (WMI Win32_Processor.MaxClockSpeed)."""
     rows = _wmi_query("SELECT MaxClockSpeed FROM Win32_Processor")
@@ -459,9 +504,12 @@ def _get_cpu() -> SimpleNamespace:
     """
     pct = psutil.cpu_percent(interval=0.0)
     max_mhz = _get_cpu_max_mhz()
-    # 优先 PDH 实时频率, fallback psutil + WMI
+    # 优先 PDH 直接频率, 再 PDH % Processor Performance × max_mhz, 最后 psutil + WMI
+    pdh_freq_mhz = _get_cpu_live_mhz_pdh_freq()
     pdh_mhz = _get_cpu_live_mhz_pdh(max_mhz)
-    if pdh_mhz > 0:
+    if pdh_freq_mhz > 0:
+        live_mhz = pdh_freq_mhz
+    elif pdh_mhz > 0:
         live_mhz = pdh_mhz
     else:
         freq = psutil.cpu_freq()
@@ -479,7 +527,11 @@ def _get_cpu() -> SimpleNamespace:
         util_percent=float(pct),
         temp_c=_get_cpu_temp(),
         # Quinn 09:30: 标记频率是否真动态
-        freq_source="pdh" if pdh_mhz > 0 else "static",
+        freq_source=(
+            "pdh_freq" if pdh_freq_mhz > 0
+            else "pdh" if pdh_mhz > 0
+            else "static"
+        ),
     )
 
 

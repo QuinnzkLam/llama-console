@@ -32,7 +32,6 @@ from llama_console_v2 import theme as t
 from llama_console_v2.widgets.card import Card
 from llama_console_v2.widgets.buttons import PrimaryButton, OutlineButton
 from llama_console_v2.widgets.json_highlighter import CmdlineJsonHighlighter
-from llama_console_v2.widgets.page_chrome import PageHeader
 from llama_console_v2.backend import llama_cpp as backend_llama
 
 
@@ -114,10 +113,8 @@ class SettingsPage(QWidget):
         outer.setSpacing(0)
         outer.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)
 
-        # --- Header ---
-        # Quinn 16:55: 关闭 show_online 删除右上角被挤压的状态元素(与 Console 一致)
-        self._header = PageHeader("设置", show_online=False)
-        outer.addWidget(self._header)
+        # 2026-11-24 Quinn: 彈窗標題欄已有「設置」— 移除頁內重複 header
+        # (原 PageHeader 頂部一層「設置」令視覺上出現兩層設置標題).
 
         # --- Body (Quinn 09:00 三轮反馈: 删 QScrollArea + PageFooter "设置", 全屏不滚动) ---
         body = QWidget()
@@ -225,7 +222,7 @@ class SettingsPage(QWidget):
         ver_col.addLayout(latest_row)
 
         # 检查更新按钮
-        self._check_update_btn = OutlineButton("检查更新", icon_char="🔄")
+        self._check_update_btn = OutlineButton("检查更新", icon_char="↻")
         t.min_h(self._check_update_btn, 36)
         self._check_update_btn.clicked.connect(self._on_check_update)
         ver_col.addWidget(self._check_update_btn)
@@ -304,7 +301,7 @@ class SettingsPage(QWidget):
         # 让输入框在矮窗口下能被压缩到合理高度, 不会强行撑高卡牌挤压其他元素
         self._cmdline_edit = QPlainTextEdit()
         # min/max_h 给个浮动范围, 让卡牌在窗口高度变化时各 widget 各得其所
-        t.min_h(self._cmdline_edit, 200, floor=140)
+        t.min_h(self._cmdline_edit, 150, floor=130)
         # Preferred/Preferred: 输入框在 stretch=1 时优先拿空间; 但垂直高度受 max 约束
         self._cmdline_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
@@ -350,7 +347,7 @@ class SettingsPage(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(t.scaled(t.space("3")))
-        self._save_btn = PrimaryButton("保存参数", icon_char="💾")
+        self._save_btn = PrimaryButton("保存参数")
         self._reset_btn = OutlineButton("恢复默认", icon_char="↻")
         t.fixed_h(self._save_btn, 40)
         t.fixed_h(self._reset_btn, 40)

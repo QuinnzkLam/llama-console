@@ -29,6 +29,9 @@ COLORS = {
     "success":           "#16a34a",   # 鲜明绿 (状态)
     "warning":           "#d97706",   # 鲜明琥珀 (状态)
     "danger":            "#dc2626",   # 鲜明红 (状态)
+    "traffic_red":       "#ff5f57",   # macOS 三粒灯 (红=关闭)
+    "traffic_yellow":    "#febc2e",   # macOS 三粒灯 (黄=收窄)
+    "traffic_green":     "#28c840",   # macOS 三粒灯 (绿=切换模式)
     "info":              "#d4d4d8",   # 中性浅灰 (去蓝)
     "ring":              "#ffffff",   # 白焦点环
 }
@@ -302,3 +305,49 @@ def card_pad(name: str) -> int:
 
 def status_color(state: str) -> str:
     return STATUS_COLORS.get(state, "text_muted")
+
+
+# ============================================================
+# LlamaDeck v3 — 新增 token (只追加, 不改上面任何现有值)
+# 所有 compact/ring 尺寸皆经 t.scaled() 使用本表基准值.
+# ============================================================
+COMPACT = {
+    "width":         980,
+    "height":        300,
+    "font_scale":    0.80,   # compact 固定字号缩放, 避免大屏展开 scale 挤爆紧凑布局
+    "radius":        14,
+    "border_width":  2,
+    "frame_margin":  14,   # 圆角卡离窗口边的透明留白 (给阴影用)
+    "shadow_blur":   24,
+    "topbar_height": 40,
+    "icon_size":     44,
+    "play_diameter": 88,
+    "gauge_diameter": 64,
+    "icon_start":    "#6366f1",  # 模型卡紫蓝渐变
+    "icon_end":      "#a855f7",
+    "traffic_red":    "#ff5f57",  # macOS 三粒灯
+    "traffic_yellow": "#febc2e",
+    "traffic_green":  "#28c840",
+}
+
+RING = {
+    "start":    "#a855f7",   # 数值弧渐变起点 (紫)
+    "end":      "#22d3ee",   # 数值弧渐变终点 (青)
+    "base":     "#2a2a2a",   # 底环深灰
+    "span_deg": 270,
+}
+
+# 展开模式单页 Dashboard (Option A) — 播放器元素尺寸两模式统一用 COMPACT
+DASH = {
+    "radius":         14,
+    "margin":         20,
+    "title_px":       15,
+    "body_px":        12,
+    "muted_px":       10,
+    "card_gap":       12,
+    "topbar_height":  44,
+    "card2":          "#151b24",   # stat chip 底
+    "divider":        "#1e242e",   # 区块分隔线
+    "gold":           "#eab308",   # 功率数值强调
+    "chip_radius":    8,
+}

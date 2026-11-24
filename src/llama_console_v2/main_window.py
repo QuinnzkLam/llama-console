@@ -11,12 +11,13 @@ Quinn 09:30 (第四轮): resize 性能优化
 - scale 阈值 0.02 → 0.05 (减少不必要 rescale)
 - _rescale_fonts 用 QTimer.singleShot 延迟, 避免阻塞 UI
 """
-from PySide6.QtCore import Qt, QRect, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QPropertyAnimation, QRect, QSettings, QSize, QTimer
+from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -29,9 +30,13 @@ from PySide6.QtWidgets import (
 
 from llama_console_v2 import theme as t
 from llama_console_v2.pages.console import ConsolePage
+from llama_console_v2.pages.dashboard import DashboardPage
+from llama_console_v2.pages.player import PlayerPage
 from llama_console_v2.pages.settings import SettingsPage
+from llama_console_v2.pages.settings_dialog import SettingsDialog
 from llama_console_v2.widgets.server_control import ServerControlSidebar
 from llama_console_v2.backend import llama_cpp as backend_llama
+from llama_console_v2.backend import hardware as backend_hw  # 2026-11-24 單一數據源中央輪詢
 from llama_console_v2.backend import frp as backend_frp  # 2026-08-31 (B1): GUI 启停同步启停 frp
 
 
@@ -89,19 +94,58 @@ class SidebarButton(QPushButton):
         self._apply_style(active)
 
 
+class _CompactFrame(QWidget):
+    """紧凑模式主体: 自绘圆角背景 + 状态色 2px 边框 (光晕由 drop shadow 提供)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._border = t.color("danger")
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def set_border_color(self, color_hex: str) -> None:
+        if color_hex == self._border:
+            return
+        self._border = color_hex
+        effect = self.graphicsEffect()
+        if isinstance(effect, QGraphicsDropShadowEffect):
+            effect.setColor(QColor(color_hex))
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = t.scaled(t.COMPACT["frame_margin"])
+        rect = self.rect().adjusted(m, m, -m, -m)
+        radius = t.scaled(t.COMPACT["radius"])
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(t.color("card"))))
+        p.drawRoundedRect(rect, radius, radius)
+        pen = QPen(QColor(self._border), t.scaled(t.COMPACT["border_width"], floor=1))
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), radius, radius)
+        p.end()
+
+
 class MainWindow(QMainWindow):
     """Main window: sidebar + stacked Console/Settings pages."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("llama-server")
+        self.setWindowTitle("LlamaDeck")
+        self._normal_flags = self.windowFlags()
+        # 两模式都 frameless + translucent: 白系统标题栏由自绘顶栏取代
+        self.setWindowFlags(self._normal_flags | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")
 
-        # 窗口大小：固定窗口模式 (R12 18:10 用户要求: 默认完整显示不滚动 + 不可拖拽调节)
-        # 固定尺寸按主屏「可用区」(扣除任务栏, 已含 DPI 缩放) 的比例计算, 并 clamp 到经验
-        # 安全区间 [1200x760, 1440x900], 保证:
-        #   - 任意屏幕分辨率/系统缩放下都不超出屏幕 (如用户 2560x1440 不会因 DPI 放大而溢出)
+        # 窗口大小：双模式均固定不可拖拽调节 (R12 18:10 用户要求)
+        #   - 紧凑模式: set_compact(True) 固定为 t.scaled(980 x 280)
+        #   - 展开模式: set_compact(False) 固定为 t.recommended_window_size()
+        # 下面基线按主屏「可用区」(扣除任务栏, 已含 DPI 缩放) 比例算并 clamp 到
+        # [1200x760, 1440x900], 仅用于初始化字体 scale; 实际尺寸锁定在 set_compact().
         #   - 内容完整显示不滚动 (tools/measure_window.py 验证该区间内均 NO-SCROLL)
-        #   - 字体 scale 受宽度限制, 卡片清晰; setFixedSize 锁定尺寸, 禁用拖拽调节/最大化.
+        #   - 字体 scale 受宽度限制, 卡片清晰; 固定尺寸禁用拖拽调节/最大化.
         screen = QApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
@@ -116,10 +160,9 @@ class MainWindow(QMainWindow):
         # 原因: offscreen 下窗口尺寸=client 高度, 但 Windows 真机的标题栏/边框会额外
         # 占用 client 高度 (~30-40px), 导致同尺寸下真机内容比模拟多一截而触发滚动条.
         # 乘 0.93 让内容整体缩小约 7%, 抵消该占用并留出垂直余量, 真机不再出现滚动条.
-        t.set_font_scale(t.compute_font_scale(win_w, win_h) * 0.93)
+        # font_scale 永久固定 0.80; 两模式元素尺寸完全一致
+        t.set_font_scale(t.COMPACT["font_scale"])
         self.resize(win_w, win_h)
-        self.setFixedSize(win_w, win_h)
-        self.setStyleSheet(f"background-color: {t.color('bg')};")
 
         # Central widget
         central = QWidget()
@@ -139,13 +182,14 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._error_banner)
 
         # Body container: 包住原来的 sidebar + stack HBox, 保留原 margin
-        body = QWidget()
-        body.setObjectName("CentralBody")
-        body.setStyleSheet("background: transparent; border: none;")
-        root_layout.addWidget(body, 1)
+        self._body = QWidget()
+        self._body.setObjectName("CentralBody")
+        self._body.setStyleSheet("background: transparent; border: none;")
+        root_layout.addWidget(self._body, 1)
 
         # Root layout = sidebar + stacked
-        layout = QHBoxLayout(body)
+        layout = QHBoxLayout(self._body)
+        self._body_layout = layout
         layout.setContentsMargins(
             t.scaled(t.space("6")), t.scaled(t.space("6")),
             t.scaled(t.space("6")), t.scaled(t.space("6"))
@@ -156,22 +200,84 @@ class MainWindow(QMainWindow):
         sidebar = self._build_sidebar()
         layout.addWidget(sidebar)
 
-        # --- Stacked content (Console | Settings) ---
+        # --- Stacked content (Console | Settings | Player) ---
         self._stack = QStackedWidget()
         self._stack.setObjectName("Content")
         self._stack.setStyleSheet("background: transparent; border: none;")
 
         self._console_page = ConsolePage()
         self._settings_page = SettingsPage()
+        self._player_page = PlayerPage()
         # v2 fix (Quinn 14:15): back_clicked signal removed from SettingsPage
         # Navigation controlled by sidebar, no back button
 
         self._stack.addWidget(self._console_page)  # index 0
         self._stack.addWidget(self._settings_page)  # index 1
-        layout.addWidget(self._stack, 1)
+        self._stack.addWidget(self._player_page)    # index 2
+        self._body_layout.addWidget(self._stack, 1)
 
-        # Default to console
-        self._switch_to(0)
+        # --- Compact frameless frame (与 body 互斥, stack 在两模式间移动) ---
+        self._compact_frame = _CompactFrame()
+        shadow = QGraphicsDropShadowEffect(self._compact_frame)
+        shadow.setBlurRadius(t.scaled(t.COMPACT["shadow_blur"]))
+        shadow.setColor(QColor(t.color("danger")))
+        shadow.setOffset(0, 0)
+        self._compact_frame.setGraphicsEffect(shadow)
+        self._frame_layout = QVBoxLayout(self._compact_frame)
+        inset = t.scaled(t.COMPACT["frame_margin"]) + t.scaled(t.COMPACT["border_width"], floor=1)
+        self._frame_layout.setContentsMargins(inset, inset, inset, inset)
+        self._frame_layout.setSpacing(0)
+        root_layout.addWidget(self._compact_frame, 1)
+
+        # 展开模式: 单页 Dashboard (旧 sidebar + stack 保留作状态机回调, 不再显示)
+        # 与 compact 同样用自绘圆角框 + 光晕, 保持 frameless 视觉一致
+        self._dashboard_page = DashboardPage()
+        self._dashboard_frame = _CompactFrame()
+        self._dashboard_frame.set_border_color(t.color("border"))
+        dash_shadow = QGraphicsDropShadowEffect(self._dashboard_frame)
+        dash_shadow.setBlurRadius(t.scaled(t.COMPACT["shadow_blur"]))
+        dash_shadow.setColor(QColor(t.color("border")))
+        dash_shadow.setOffset(0, 0)
+        self._dashboard_frame.setGraphicsEffect(dash_shadow)
+        self._dash_frame_layout = QVBoxLayout(self._dashboard_frame)
+        inset = t.scaled(t.COMPACT["frame_margin"]) + t.scaled(t.COMPACT["border_width"], floor=1)
+        self._dash_frame_layout.setContentsMargins(inset, inset, inset, inset)
+        self._dash_frame_layout.setSpacing(0)
+        self._dash_frame_layout.addWidget(self._dashboard_page)
+        root_layout.addWidget(self._dashboard_frame, 1)
+        self._dashboard_frame.hide()
+
+        # 播放键 / Space 与 sidebar 共用同一组 start/stop 回调
+        self._player_page.startRequested.connect(self._on_sidebar_start)
+        self._player_page.stopRequested.connect(self._on_sidebar_stop)
+        self._player_page.compactRequested.connect(self.set_compact)
+        self._player_page.closeRequested.connect(self.close)
+        self._player_page.borderColorChanged.connect(self._compact_frame.set_border_color)
+        self._player_page.borderColorChanged.connect(self._dashboard_frame.set_border_color)
+        self._dashboard_page.borderColorChanged.connect(self._dashboard_frame.set_border_color)
+        self._dashboard_page.compactRequested.connect(self.set_compact)
+        self._dashboard_page.closeRequested.connect(self.close)
+        self._dashboard_page.settingsRequested.connect(self._open_settings)
+        self._dashboard_page.startRequested.connect(self._on_sidebar_start)
+        self._dashboard_page.stopRequested.connect(self._on_sidebar_stop)
+        esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        esc_shortcut.activated.connect(lambda: self.set_compact(True) if self._compact else None)
+
+        # Default to player (LlamaDeck 主页); 随后按 QSettings 进入上次模式
+        self._switch_to(2)
+        self._settings = QSettings("Quinn", "LlamaDeck")
+        self._compact: bool | None = None
+        self.set_compact(bool(self._settings.value("compact_mode", True, type=bool)))
+
+        # 2026-11-24 單一數據源: 緊湊頁/展開頁/內嵌播放器共用一份 llama 狀態
+        # + 硬件快照 (之前三個實例各自 poll, 狀態/邊框燈/數據互相唔同步).
+        # force 狀態 (stopping/starting/failed) 都收喺 MainWindow.
+        self._force_state: str | None = None
+        self._state_poll = QTimer(self)
+        self._state_poll.setInterval(2000)
+        self._state_poll.timeout.connect(self._poll_shared)
+        self._state_poll.start()
+        QTimer.singleShot(0, self._poll_shared)
 
     def _build_sidebar(self) -> QWidget:
         """Sidebar: 与窗口同高的独立侧边栏页面元素.
@@ -214,16 +320,18 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(t.scaled(t.space("7")))
 
-        # Nav items (Console / Settings)
+        # Nav items (Player / Console / Settings) — 按钮顺序即 stack index 顺序
         self._nav_buttons: list[SidebarButton] = []
+        self._nav_indices: list[int] = []
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
-        nav_items = [("控制台", "📈"), ("设置", "⚙")]
-        for i, (label, icon) in enumerate(nav_items):
+        nav_items = [("播放器", "▶", 2), ("控制台", "📈", 0), ("设置", "⚙", 1)]
+        for label, icon, idx in nav_items:
             btn = SidebarButton(label, icon_char=icon)
-            btn.clicked.connect(lambda _checked, idx=i: self._switch_to(idx))
-            self._nav_group.addButton(btn, i)
+            btn.clicked.connect(lambda _checked, i=idx: self._switch_to(i))
+            self._nav_group.addButton(btn, idx)
             self._nav_buttons.append(btn)
+            self._nav_indices.append(idx)
             layout.addWidget(btn)
 
         # Quinn 09:00 三轮: Server 控制 (启动/停止) 区段代替原方案区段, 无分隔线无标题
@@ -236,6 +344,30 @@ class MainWindow(QMainWindow):
         layout.addSpacing(t.scaled(t.space("4")))
 
         return sidebar
+
+    def _poll_shared(self) -> None:
+        """單一數據源: 採樣一次 → 同步推送兩頁 (含內嵌播放器)."""
+        try:
+            snap = backend_llama.snapshot()
+            state, pid = snap.state, snap.pid
+        except Exception:  # noqa: BLE001
+            state, pid = "stopped", None
+        try:
+            hw = backend_hw.snapshot()
+        except Exception:  # noqa: BLE001
+            hw = None
+        force = self._force_state
+        if force == "failed" and state == "running":
+            self._force_state = None
+            force = None
+        elif force == "starting" and state == "running":
+            self._force_state = None
+            force = None
+        elif force == "stopping" and state in ("stopped", "idle"):
+            self._force_state = None  # 服務已死: 顯示返「待启动」
+            force = None
+        self._player_page.apply_shared(state, pid, force, hw)
+        self._dashboard_page.apply_shared(state, pid, force, hw)
 
     def _on_sidebar_start(self) -> None:
         """侧边栏「启动」按钮: 读 JSON 配置 dict 作为 extra_args 启动.
@@ -252,6 +384,8 @@ class MainWindow(QMainWindow):
         — 同步起 frpc tunnel. 幂等: frpc 已经在跑 → no-op. 错误全捕获
         (frp.start_frpc 唔 throw), 所以 frp 失败都唔会 crash GUI.
         """
+        self._force_state = "starting"
+        self._poll_shared()  # 即時顯示「启动中」黃色 (兩頁同步)
         try:
             extra_args_dict = backend_llama.load_cmdline_args_dict()
         except Exception:
@@ -286,8 +420,11 @@ class MainWindow(QMainWindow):
             print(f"[main_window] start ok but health unreachable, log: {log_path}")
             self._show_error_banner(log_path, err or "health endpoint not reachable in 3s")
             self._server_ctrl.mark_failed()  # 立即 pill 切到「启动失败」
-        # 切到控制台 + 多次刷新 (启动 → loading → running)
-        self._switch_to(0)
+            self._force_state = "failed"
+            self._poll_shared()  # 播放器/展開頁邊框同步失败态 (單一數據源)
+        # 切到控制台 + 多次刷新 (启动 → loading → running); 紧凑模式保持播放器页
+        if not self._compact:
+            self._switch_to(0)
         self._server_ctrl.refresh()  # 立即更新 pill 到 loading
         QTimer.singleShot(0, self._console_page.refresh)
         QTimer.singleShot(1500, self._console_page.refresh)
@@ -306,6 +443,8 @@ class MainWindow(QMainWindow):
           弹错误 banner 明确告知用户, 并提示需要 UAC 授权.
         - elevated=True 时提示「已通过管理员授权停止」.
         """
+        self._force_state = "stopping"
+        self._poll_shared()  # 即時顯示「關閉中」橙色 (兩頁同步)
         try:
             stop_res = backend_llama.stop()
         except Exception as e:
@@ -321,8 +460,8 @@ class MainWindow(QMainWindow):
             if elevated:
                 msg = "已发起管理员授权停止, 但 llama-server 仍未能终止, 请检查"
             elif residual:
-                msg = ("llama-server 由计划任务以管理员权限启动, 普通权限无法停止; "
-                       "请在系统弹窗中允许管理员授权")
+                msg = ("llama-server 提权停止失败 (计划任务 Hedanji-Llama-Stop 已触发); "
+                       "请手动结束进程或重启后再试")
             print(f"[main_window] stop issue: {msg}")
             self._show_error_banner("", msg)
         elif elevated:
@@ -340,6 +479,7 @@ class MainWindow(QMainWindow):
         else:
             print(f"[main_window] FRP 停止失败: {frp_res.get('error')}")
         self._server_ctrl.refresh()  # 立即更新 pill 到 stopped
+        self._poll_shared()
         QTimer.singleShot(0, self._console_page.refresh)
         QTimer.singleShot(1500, self._console_page.refresh)
         QTimer.singleShot(3500, self._console_page.refresh)
@@ -463,11 +603,78 @@ class MainWindow(QMainWindow):
 
     def _switch_to(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
-        for i, btn in enumerate(self._nav_buttons):
-            btn.set_active(i == index)
+        for idx, btn in zip(self._nav_indices, self._nav_buttons):
+            btn.set_active(idx == index)
         # Refresh when switching to console
         if index == 0:
             self._console_page.refresh()
+
+    def _open_settings(self) -> None:
+        dlg = SettingsDialog(self)
+        dlg.exec()
+
+    def _apply_mode(self, compact: bool) -> None:
+        """实际切换 frame + 瞬时 resize (由淡入淡出动画调用)."""
+        if compact:
+            self._compact_frame.set_border_color(self._player_page.border_color())
+            if self._stack.parent() is not self._compact_frame:
+                self._body_layout.removeWidget(self._stack)
+                self._frame_layout.addWidget(self._stack, 1)
+            self._dashboard_frame.hide()
+            self._body.hide()
+            self._error_banner.hide()
+            self._compact_frame.show()
+            self._stack.setCurrentIndex(2)
+            w = t.scaled(t.COMPACT["width"])
+            h = t.scaled(t.COMPACT["height"])
+        else:
+            self._compact_frame.hide()
+            self._body.hide()
+            self._dashboard_frame.show()
+            self._dashboard_frame.set_border_color(self._dashboard_page.border_color())
+            # 宽度全程不变 (同紧凑); 只按 Dashboard 内容拉伸高度
+            w = t.scaled(t.COMPACT["width"])
+            inset = t.scaled(t.COMPACT["frame_margin"]) + t.scaled(t.COMPACT["border_width"], floor=1)
+            screen = QApplication.primaryScreen()
+            avail_h = screen.availableGeometry().height() if screen is not None else w
+            h = min(max(self._dashboard_page.sizeHint().height() + inset * 2, 240), avail_h)
+        self.setMinimumSize(QSize(0, 0))
+        self.setMaximumSize(QSize(16_777_215, 16_777_215))
+        self.resize(w, h)
+        self.setFixedSize(w, h)
+        self._player_page.set_compact_mode(compact)
+        if self.isVisible():
+            self.show()
+
+    def set_compact(self, compact: bool) -> None:
+        """紧凑 ↔ 展开: 150ms 淡出 → 换模式 → 150ms 淡入 (避免 geometry 一闪)."""
+        if self._compact == compact:
+            return
+        self._compact = compact
+        self._settings.setValue("compact_mode", compact)
+        if not self.isVisible():  # 初始化: 直接套用, 无动画
+            self._apply_mode(compact)
+            return
+        fade_out = QPropertyAnimation(self, b"windowOpacity")
+        fade_out.setDuration(150)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.finished.connect(lambda: self._fade_in_after(compact))
+        self._fade_anim = fade_out  # 保住 reference, 免被 GC
+        fade_out.start()
+
+    def _fade_in_after(self, compact: bool) -> None:
+        self._apply_mode(compact)
+        fade_in = QPropertyAnimation(self, b"windowOpacity")
+        fade_in.setDuration(150)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        self._fade_anim = fade_in
+        fade_in.start()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._rescale_ready = True
 
     def resizeEvent(self, event) -> None:
         """窗口尺寸变化时, 防抖重算并应用字体 + 几何缩放。
@@ -479,6 +686,13 @@ class MainWindow(QMainWindow):
         3) rescale 用 QTimer.singleShot, 不阻塞 paint
         """
         super().resizeEvent(event)
+        # 淡入淡出期间唔好重算字体 (窗口即将换尺寸)
+        anim = getattr(self, "_fade_anim", None)
+        if anim is not None and anim.state() == QPropertyAnimation.State.Running:
+            return
+        # 初始化 resize 尚未 show() 时跳过, 保留 app.py 设定并经 0.93 收紧的字体缩放
+        if not getattr(self, "_rescale_ready", False):
+            return
         # R12 (18:10): 固定窗口模式 — 尺寸锁定 (min==max), 不会因用户拖拽变化,
         #   跳过字体重算, 避免异常 geometry (如 offscreen 初始尺寸) 误触发缩放导致内容溢出
         if self.minimumWidth() == self.maximumWidth() and \
@@ -493,20 +707,8 @@ class MainWindow(QMainWindow):
         self._resize_timer.start()
 
     def _apply_rescale(self) -> None:
-        """防抖后真正执行: 缩放 + 重算 + 重布局."""
-        new_scale = t.compute_font_scale(self.width(), self.height())
-        old_scale = t.get_font_scale()
-        if abs(new_scale - old_scale) < 0.05:
-            return  # Quinn 09:30: 阈值 0.02 → 0.05, 减少微小 resize 反复触发
-        ratio = new_scale / old_scale
-        t.set_font_scale(new_scale)
-        # 1) 重算并应用所有已注册 widget 的几何（min/max/fixed height/width）
+        """font_scale 永久固定 0.80; resize 只重算几何, 唔再改字号."""
         t.rescale_all_geometries()
-        # 2) 重算并应用所有显式设置了字号的字体（兼容已 setFont 的 widget）
-        self._rescale_fonts(self, ratio)
-        # 3) 触发子页面重新布局
-        if hasattr(self, "_console_page") and self._console_page is not None:
-            self._console_page._force_relayout()
 
     @staticmethod
     def _rescale_fonts(widget, ratio: float) -> None:
