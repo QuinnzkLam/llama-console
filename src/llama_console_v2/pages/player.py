@@ -581,6 +581,9 @@ class PlayerPage(QWidget):
         if force == "failed" and state == "running":
             self._force_state = None
             force = None
+        elif force == "stopping" and state in ("stopped", "idle"):
+            self._force_state = None  # 服務已死: 顯示返「待启动」
+            force = None
         key = _state_key(force or state)
         text, color_key, self._runningish = _STATE_VIEW[key]
         self._combo.setEnabled(not self._runningish)  # 运行中锁定模型选择
@@ -632,8 +635,11 @@ class PlayerPage(QWidget):
         self._no_gpu.setVisible(not gpus)
 
     def _uptime_text(self, state: str, pid) -> str:
-        """llama-server 实际 create_time (最早进程) → GUI 内部计时兜底."""
-        if state == "running":
+        """llama-server 实际 create_time (最早进程) → GUI 内部计时兜底.
+
+        進程存在就顯示真實時長 — 唔 gate 喺 state (health 探測會抖動,
+        令 uptime 喺 llama 時間同 GUI 時間之間跳)."""
+        if pid or state == "running":
             created: list[float] = []
             pids: list[int] = []
             if pid:

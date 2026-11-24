@@ -876,13 +876,30 @@ def stop() -> dict:
         else:
             residual = True
         if residual:
-            elevated = _elevated_kill_llama()
-            # 再等一次让 elevated taskkill 生效
-            time.sleep(2.0)
-            if _find_process() is None:
-                residual = False
-                if "llama-server.exe (elevated)" not in killed:
-                    killed.append("llama-server.exe (elevated)")
+            # 2026-11-24: 優先用提權計劃任務 Hedanji-Llama-Stop (schtasks /Run
+            # 唔彈 UAC — task scheduler 以 S4U+Highest 執行 taskkill)
+            try:
+                subprocess.run(
+                    ["schtasks", "/Run", "/TN", "Hedanji-Llama-Stop"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                time.sleep(3.0)
+                if _find_process() is None:
+                    residual = False
+                    elevated = True
+                    if "llama-server.exe (elevated-task)" not in killed:
+                        killed.append("llama-server.exe (elevated-task)")
+            except Exception:  # noqa: BLE001 — schtasks 失敗 fallback UAC
+                pass
+            if residual:
+                elevated = _elevated_kill_llama()
+                # 再等一次让 elevated taskkill 生效
+                time.sleep(2.0)
+                if _find_process() is None:
+                    residual = False
+                    if "llama-server.exe (elevated)" not in killed:
+                        killed.append("llama-server.exe (elevated)")
         return {"ok": True, "killed": killed, "elevated": elevated,
                 "residual": residual, "error": None}
     except Exception as e:
