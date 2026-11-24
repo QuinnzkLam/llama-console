@@ -5,6 +5,7 @@
 # The --distpath flag is REQUIRED: PyInstaller's default dist folder is
 # relative to the spec file's own dir, which would put NLM.exe into
 # scripts\dist\ instead of the repo-root dist\ (where it must stay).
+import glob
 import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_all
@@ -59,7 +60,9 @@ a = Analysis(
     binaries=_pn_binaries,
     datas=[(r'D:\\llama-console\\.venv\\Lib\\site-packages\\certifi\\cacert.pem', 'certifi'),
            (r'D:\\llama-console\\assets\\LlamaDeck.ico', 'assets'),
-           (r'D:\\services\\lhm\\LibreHardwareMonitorLib.dll', '.')] + _pn_datas,
+           (r'D:\\services\\lhm\\LibreHardwareMonitorLib.dll', '.')]
+           + _pn_datas
+           + [(f, '.') for f in glob.glob(r'D:\services\lhm\*.dll')],
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},

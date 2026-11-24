@@ -11,7 +11,7 @@ Quinn 09:30 (第四轮): resize 性能优化
 - scale 阈值 0.02 → 0.05 (减少不必要 rescale)
 - _rescale_fonts 用 QTimer.singleShot 延迟, 避免阻塞 UI
 """
-from PySide6.QtCore import Qt, QEasingCurve, QPropertyAnimation, QRect, QSettings, QSize, QTimer
+from PySide6.QtCore import Qt, QPropertyAnimation, QRect, QSettings, QSize, QTimer
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -572,32 +572,8 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self)
         dlg.exec()
 
-    def _morph_to(self, w: int, h: int, animate: bool) -> None:
-        """180ms OutCubic geometry morph; 完结后先至锁定固定尺寸."""
-        self.setMinimumSize(QSize(0, 0))
-        self.setMaximumSize(QSize(16_777_215, 16_777_215))
-        if not animate:
-            self.resize(w, h)
-            self.setFixedSize(w, h)
-            return
-        anim = QPropertyAnimation(self, b"geometry")
-        anim.setDuration(180)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        end = self.geometry()
-        end.setWidth(w)
-        end.setHeight(h)
-        anim.setEndValue(end)
-        anim.finished.connect(lambda: self.setFixedSize(w, h))
-        self._morph_anim = anim  # 保住 reference, 免被 GC
-        anim.start()
-
-    def set_compact(self, compact: bool) -> None:
-        """紧凑 frameless 播放器 ↔ 展开 frameless 单页 Dashboard."""
-        if self._compact == compact:
-            return
-        was_visible = self.isVisible()
-        self._compact = compact
-        self._settings.setValue("compact_mode", compact)
+    def _apply_mode(self, compact: bool) -> None:
+        """实际切换 frame + 瞬时 resize (由淡入淡出动画调用)."""
         if compact:
             self._compact_frame.set_border_color(self._player_page.border_color())
             if self._stack.parent() is not self._compact_frame:
@@ -608,22 +584,52 @@ class MainWindow(QMainWindow):
             self._error_banner.hide()
             self._compact_frame.show()
             self._stack.setCurrentIndex(2)
-            target = (t.scaled(t.COMPACT["width"]), t.scaled(t.COMPACT["height"]))
+            w = t.scaled(t.COMPACT["width"])
+            h = t.scaled(t.COMPACT["height"])
         else:
             self._compact_frame.hide()
             self._body.hide()
             self._dashboard_frame.show()
+            self._dashboard_frame.set_border_color(self._dashboard_page.border_color())
             # 宽度全程不变 (同紧凑); 只按 Dashboard 内容拉伸高度
-            rw = t.scaled(t.COMPACT["width"])
+            w = t.scaled(t.COMPACT["width"])
             inset = t.scaled(t.COMPACT["frame_margin"]) + t.scaled(t.COMPACT["border_width"], floor=1)
             screen = QApplication.primaryScreen()
-            avail_h = screen.availableGeometry().height() if screen is not None else rw
+            avail_h = screen.availableGeometry().height() if screen is not None else w
             h = min(max(self._dashboard_page.sizeHint().height() + inset * 2, 240), avail_h)
-            target = (rw, h)
+        self.setMinimumSize(QSize(0, 0))
+        self.setMaximumSize(QSize(16_777_215, 16_777_215))
+        self.resize(w, h)
+        self.setFixedSize(w, h)
         self._player_page.set_compact_mode(compact)
-        self._morph_to(target[0], target[1], was_visible)
-        if was_visible:
+        if self.isVisible():
             self.show()
+
+    def set_compact(self, compact: bool) -> None:
+        """紧凑 ↔ 展开: 150ms 淡出 → 换模式 → 150ms 淡入 (避免 geometry 一闪)."""
+        if self._compact == compact:
+            return
+        self._compact = compact
+        self._settings.setValue("compact_mode", compact)
+        if not self.isVisible():  # 初始化: 直接套用, 无动画
+            self._apply_mode(compact)
+            return
+        fade_out = QPropertyAnimation(self, b"windowOpacity")
+        fade_out.setDuration(150)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.finished.connect(lambda: self._fade_in_after(compact))
+        self._fade_anim = fade_out  # 保住 reference, 免被 GC
+        fade_out.start()
+
+    def _fade_in_after(self, compact: bool) -> None:
+        self._apply_mode(compact)
+        fade_in = QPropertyAnimation(self, b"windowOpacity")
+        fade_in.setDuration(150)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        self._fade_anim = fade_in
+        fade_in.start()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -639,8 +645,8 @@ class MainWindow(QMainWindow):
         3) rescale 用 QTimer.singleShot, 不阻塞 paint
         """
         super().resizeEvent(event)
-        # 动画期间唔好重算字体 (中间 geometry 唔代表最终尺寸)
-        anim = getattr(self, "_morph_anim", None)
+        # 淡入淡出期间唔好重算字体 (窗口即将换尺寸)
+        anim = getattr(self, "_fade_anim", None)
         if anim is not None and anim.state() == QPropertyAnimation.State.Running:
             return
         # 初始化 resize 尚未 show() 时跳过, 保留 app.py 设定并经 0.93 收紧的字体缩放

@@ -140,6 +140,10 @@ class DashboardPage(QWidget):
         self._refresh()
 
     # ---------------- 构建 ----------------
+    def border_color(self) -> str:
+        """转发内嵌播放器状态色, 畀展开 frame 初始同步."""
+        return self._player.border_color()
+
     def _place_expand_button(self) -> None:
         btn = self._expand_btn
         m = t.scaled(8)

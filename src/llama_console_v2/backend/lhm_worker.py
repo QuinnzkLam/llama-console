@@ -59,6 +59,13 @@ def _open() -> None:
     if _COMPUTER is not None:
         return
     import clr  # type: ignore
+    # 先加载 LHM 目录全部依赖 DLL (System.Memory / Newtonsoft 等) — 否则 Open() 报
+    # 「无法加載 System.Memory, Version=4.0.5.0」。非托管 DLL 会 throw, 静默跳过。
+    for dep in sorted(_dll_path().parent.glob("*.dll")):
+        try:
+            clr.AddReference(str(dep))
+        except Exception:  # noqa: BLE001
+            continue
     clr.AddReference(str(_dll_path()))
     from LibreHardwareMonitor.Hardware import Computer  # type: ignore
     computer = Computer()
