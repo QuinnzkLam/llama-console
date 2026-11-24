@@ -842,7 +842,7 @@ def stop() -> dict:
                     killed.append(name)
             # Forward-compat: 如果当时有其他 llama*.exe 跑紧, 主动探一下并 kill
             my_pid = os.getpid()
-            for p in psutil.process_iter(["name"]):
+            for p in psutil.process_iter(["name", "pid"]):
                 try:
                     if p.info["pid"] == my_pid:
                         continue  # 唔好自殺 — GUI 本體都匹配 llama* pattern (2026-11-24)
